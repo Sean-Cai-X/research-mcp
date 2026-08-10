@@ -1,10 +1,12 @@
 name: Build & Publish Release Binary
 
-# 仅推送 v 开头版本标签触发构建
+# 推送 v* 或 gn-* 标签触发构建；支持 workflow_dispatch 手动触发
 on:
   push:
     tags:
       - 'v*'
+      - 'gn-*'
+  workflow_dispatch:
 
 # 授权:允许创建 Release、上传制品
 permissions:
