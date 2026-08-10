@@ -1,6 +1,10 @@
-# Build output
-build/
-build*/
+# Build output (保留 build/release.args / build/debug.args 用于 GN 通用模板)
+build/*
+!build/release.args
+!build/debug.args
+build-rel/
+build-release/
+build-debug/
 out/
 bin/
 lib/
@@ -52,6 +56,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+mcp_pid.txt
 
 # OS files
 Thumbs.db

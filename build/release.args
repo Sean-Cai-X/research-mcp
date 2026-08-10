@@ -1,0 +1,9 @@
+# 通用 GN Release 参数模板
+# 用法: gn gen out/release --args-file=build/release.args
+# 纳入版本控制, 任何参数变更都会触发缓存 Key 重新计算(ARGS_HASH)
+
+is_optimized = true
+is_debug = false
+use_debug_dwarf = false
+symbol_level = 0
+strip_output = true

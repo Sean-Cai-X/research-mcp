@@ -99,31 +99,51 @@ json NavigateAndExecuteRaw(WebViewSession& session,
                            const char* logPrefix,
                            int waitMs,
                            uint32_t navTimeoutMs) {
+    auto t0 = std::chrono::steady_clock::now();
+    auto dbg_ms = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0).count();
+    };
+    {
+        std::string url_narrow;
+        url_narrow.reserve(url.size());
+        for (wchar_t wc : url) { url_narrow.push_back(static_cast<char>(wc & 0xFF)); }
+        std::cerr << logPrefix << " [dbg] NavigateAndExecuteRaw START url="
+                  << url_narrow
+                  << " waitMs=" << waitMs << " navTimeout=" << navTimeoutMs << std::endl;
+    }
+
     if (!session.IsReady()) {
-        std::cerr << logPrefix << " session not ready" << std::endl;
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms session not ready" << std::endl;
         return nullptr;
     }
+    std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms session ready, calling Navigate" << std::endl;
 
     HRESULT hr = session.Navigate(url);
     if (FAILED(hr)) {
-        std::cerr << logPrefix << " Navigate failed: 0x" << std::hex << hr << std::endl;
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate failed: 0x" << std::hex << hr << std::endl;
         return nullptr;
     }
+    std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate OK, waiting for nav completion" << std::endl;
 
     HRESULT navRes = session.WaitForNavigation(navTimeoutMs);
     if (FAILED(navRes)) {
-        std::cerr << logPrefix << " Nav timeout, still attempt read" << std::endl;
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms WaitForNavigation TIMEOUT/FAIL, still attempt read" << std::endl;
     } else {
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms WaitForNavigation OK" << std::endl;
         if (waitMs > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+            std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms sleep(" << waitMs << ") done" << std::endl;
         }
     }
 
+    std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms calling ExecuteScript" << std::endl;
     ScriptResult sr = session.ExecuteScript(js);
     if (!sr.success) {
-        std::cerr << logPrefix << " JS exec failed: " << sr.error << std::endl;
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms ExecuteScript FAILED: " << sr.error << std::endl;
         return nullptr;
     }
+    std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms ExecuteScript OK, data_len=" << sr.data.size() << std::endl;
 
     // 第一次尝试直接解析
     try {
@@ -131,6 +151,7 @@ json NavigateAndExecuteRaw(WebViewSession& session,
         if (parsed.is_string()) {
             parsed = json::parse(parsed.get<std::string>());
         }
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms parse OK, returning" << std::endl;
         return parsed;
     } catch (const std::exception& e) {
         // 第一次解析失败(常见原因:ar5iv 等站点返回含特殊 Unicode 字符,如 en-dash,
@@ -197,11 +218,11 @@ json NavigateAndExecuteRaw(WebViewSession& session,
             if (parsed.is_string()) {
                 parsed = json::parse(parsed.get<std::string>());
             }
-            std::cerr << logPrefix << " JSON parse recovered after UTF-8 cleanup" << std::endl;
+            std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms JSON parse recovered after UTF-8 cleanup" << std::endl;
             return parsed;
         } catch (const std::exception& e2) {
             std::string raw = sr.data.substr(0, 300);
-            std::cerr << logPrefix << " JSON parse failed even after cleanup: " << e2.what()
+            std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms JSON parse failed even after cleanup: " << e2.what()
                       << " raw=" << raw << std::endl;
             return nullptr;
         }

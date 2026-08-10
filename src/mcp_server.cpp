@@ -5,6 +5,7 @@
 #include "github_research/cache_manager.hpp"
 #include "github_research/arxiv_tools.hpp"
 #include "github_research/hackernews_tools.hpp"
+#include "github_research/research_deep_dive.hpp"
 #include "github_research/package_tools.hpp"
 #include "github_research/paperswithcode_tools.hpp"
 #include "github_research/huggingface_tools.hpp"
@@ -19,8 +20,35 @@
 #include <cstdlib>
 #include <atomic>
 #include <memory>
+#include <chrono>
+#include <iomanip>
 
 namespace github_research {
+
+// ============ 调试日志辅助(带毫秒时间戳) ============
+// 用法: DBG_LOG("hn") << "msg"; 会在 stderr 输出 [12:34:56.789][hn] msg
+struct DbgLog {
+    DbgLog(const char* tag) {
+        auto now = std::chrono::system_clock::now();
+        auto t  = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now.time_since_epoch()) % 1000;
+        std::tm tmv{};
+#ifdef _WIN32
+        localtime_s(&tmv, &t);
+#else
+        localtime_r(&t, &tmv);
+#endif
+        std::cerr << "[" << std::put_time(&tmv, "%H:%M:%S") << "."
+                  << std::setfill('0') << std::setw(3) << ms.count() << "]["
+                  << tag << "] ";
+    }
+    ~DbgLog() { std::cerr << std::endl; }
+
+    template <typename T>
+    DbgLog& operator<<(const T& v) { std::cerr << v; return *this; }
+};
+#define DBG_LOG(tag) DbgLog(tag)
 
 // tools.cpp 中实现的 GitHub 工具分发函数
 json dispatch_tool_call(GitHubClient& client, const json& params);
@@ -74,14 +102,16 @@ bool McpServer::init_session(std::unique_ptr<WebViewSession>& session,
     if (session) return true;  // 已初始化
     std::string effective_proxy = proxy_url.empty() ? proxy_url_ : proxy_url;
 
+    DBG_LOG(logName) << "init_session: creating WebViewSession, proxy=" << effective_proxy;
     session = std::make_unique<WebViewSession>();
+    DBG_LOG(logName) << "init_session: calling session->Init ...";
     HRESULT hr = session->Init(userDataDir, L"", effective_proxy);
     if (FAILED(hr)) {
-        std::cerr << "[mcp] " << logName << " session init failed: 0x"
-                  << std::hex << hr << std::endl;
+        DBG_LOG(logName) << "init_session: Init FAILED: 0x" << std::hex << hr;
         session.reset();
         return false;
     }
+    DBG_LOG(logName) << "init_session: Init OK, session ready";
     log(std::string(logName) + " session ready");
     return true;
 }
@@ -382,6 +412,59 @@ bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::s
 }
 void McpServer::shutdown_stackoverflow() { shutdown_session(so_session_, "StackOverflow"); }
 
+// ============ 懒加载:首次 tool 调用时按 profile 路径初始化对应会话 ============
+namespace {
+// UTF-8 string -> wstring(profile 路径)
+inline std::wstring profile_to_wstr(const std::string& s) {
+    return std::wstring(s.begin(), s.end());
+}
+}  // namespace
+
+bool McpServer::ensure_arxiv_session() {
+    if (arxiv_session_) return true;
+    if (profile_paths_.arxiv.empty()) return false;
+    return init_arxiv(profile_to_wstr(profile_paths_.arxiv), proxy_url_);
+}
+bool McpServer::ensure_hn_session() {
+    if (hn_session_) {
+        DBG_LOG("hn") << "ensure_hn_session: already initialized";
+        return true;
+    }
+    if (profile_paths_.hn.empty()) {
+        DBG_LOG("hn") << "ensure_hn_session: FAIL, profile_paths_.hn is empty";
+        return false;
+    }
+    DBG_LOG("hn") << "ensure_hn_session: first call, invoking init_hackernews ...";
+    bool ok = init_hackernews(profile_to_wstr(profile_paths_.hn), proxy_url_);
+    DBG_LOG("hn") << "ensure_hn_session: init_hackernews returned " << (ok ? "true" : "false");
+    return ok;
+}
+bool McpServer::ensure_pkg_session() {
+    if (pkg_session_) return true;
+    if (profile_paths_.pkg.empty()) return false;
+    return init_package(profile_to_wstr(profile_paths_.pkg), proxy_url_);
+}
+bool McpServer::ensure_pwc_session() {
+    if (pwc_session_) return true;
+    if (profile_paths_.pwc.empty()) return false;
+    return init_paperswithcode(profile_to_wstr(profile_paths_.pwc), proxy_url_);
+}
+bool McpServer::ensure_hf_session() {
+    if (hf_session_) return true;
+    if (profile_paths_.hf.empty()) return false;
+    return init_huggingface(profile_to_wstr(profile_paths_.hf), proxy_url_);
+}
+bool McpServer::ensure_s2_session() {
+    if (s2_session_) return true;
+    if (profile_paths_.s2.empty()) return false;
+    return init_semanticscholar(profile_to_wstr(profile_paths_.s2), proxy_url_);
+}
+bool McpServer::ensure_so_session() {
+    if (so_session_) return true;
+    if (profile_paths_.so.empty()) return false;
+    return init_stackoverflow(profile_to_wstr(profile_paths_.so), proxy_url_);
+}
+
 // ============ arXiv 工具分发(6 个工具: 4 原始 + 2 分层) ============
 json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& args) {
     // arxiv_get_pdf_link 是纯 ID 规则拼接,零网络请求,允许在无会话时使用
@@ -396,7 +479,7 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
         }
     }
     // 其余 5 个工具(搜索/详情/连通性/索引/深挖)需要浏览器会话
-    if (!arxiv_session_) {
+    if (!ensure_arxiv_session()) {
         return {
             {"content", json::array({{{"type", "text"}, {"text", "ERROR: arXiv session not initialized. Start server with --arxiv-profile <DIR>."}}})},
             {"isError", true}
@@ -427,9 +510,14 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
 
 // ============ Hacker News 工具分发(7 个 hn_* 工具: 5 原始 + 2 分层) ============
 json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args) {
-    if (!hn_session_) return McpError("ERROR: HackerNews session not initialized. Start with --hn-profile <DIR>.");
+    DBG_LOG("hn") << "dispatch_hn_tool: tool=" << tool_name << " args=" << args.dump().substr(0, 200);
+    if (!ensure_hn_session()) {
+        DBG_LOG("hn") << "dispatch_hn_tool: ensure_hn_session failed";
+        return McpError("ERROR: HackerNews session not initialized. Start with --hn-profile <DIR>.");
+    }
+    DBG_LOG("hn") << "dispatch_hn_tool: session ready, dispatching ...";
     try {
-        if (tool_name == "hn_get_top_stories")       return ToolHnGetTopStories(*hn_session_, args);
+        if (tool_name == "hn_get_top_stories")       { DBG_LOG("hn") << "calling ToolHnGetTopStories"; auto r = ToolHnGetTopStories(*hn_session_, args); DBG_LOG("hn") << "ToolHnGetTopStories done, result size=" << r.dump().size(); return r; }
         if (tool_name == "hn_get_new_stories")       return ToolHnGetNewStories(*hn_session_, args);
         if (tool_name == "hn_get_best_stories")      return ToolHnGetBestStories(*hn_session_, args);
         if (tool_name == "hn_get_item")              return ToolHnGetItem(*hn_session_, args);
@@ -437,14 +525,38 @@ json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args)
         if (tool_name == "hn_get_latest_index")      return ToolHnGetLatestIndex(*hn_session_, args);
         if (tool_name == "hn_fetch_detailed_story")  return ToolHnFetchDetailedStory(*hn_session_, args);
     } catch (const std::exception& e) {
+        DBG_LOG("hn") << "dispatch_hn_tool: exception: " << e.what();
         return McpError(std::string("ERROR: hn tool exception: ") + e.what());
     }
+    DBG_LOG("hn") << "dispatch_hn_tool: unknown tool: " << tool_name;
     return McpError("ERROR: unknown hn tool: " + tool_name);
+}
+
+// ============ 跨源 DeepDive 工具 (research_* 前缀, 用 HN session + 图谱) ============
+json McpServer::dispatch_research_tool(const std::string& tool_name, const json& args) {
+    DBG_LOG("dd") << "dispatch_research_tool: tool=" << tool_name;
+    // research_deep_dive 用 HN session(因为 WebView 可以导航任意 URL)
+    if (!ensure_hn_session()) {
+        return McpError("ERROR: research_deep_dive requires --hn-profile <DIR> (WebView for secondary page fetching).");
+    }
+    try {
+        if (tool_name == "research_deep_dive") {
+            DBG_LOG("dd") << "calling ToolResearchDeepDive";
+            auto r = ToolResearchDeepDive(*hn_session_, args);
+            DBG_LOG("dd") << "ToolResearchDeepDive done, result size=" << r.dump().size();
+            return r;
+        }
+    } catch (const std::exception& e) {
+        DBG_LOG("dd") << "dispatch_research_tool exception: " << e.what();
+        return McpError(std::string("ERROR: research tool exception: ") + e.what());
+    }
+    DBG_LOG("dd") << "dispatch_research_tool: unknown tool: " << tool_name;
+    return McpError("ERROR: unknown research tool: " + tool_name);
 }
 
 // ============ Package Registry 工具分发(5 个 pkg_* 工具: 4 原始 + 1 分层) ============
 json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args) {
-    if (!pkg_session_) return McpError("ERROR: Package session not initialized. Start with --pkg-profile <DIR>.");
+    if (!ensure_pkg_session()) return McpError("ERROR: Package session not initialized. Start with --pkg-profile <DIR>.");
     try {
         if (tool_name == "pkg_search_npm")      return ToolPkgSearchNpm(*pkg_session_, args);
         if (tool_name == "pkg_get_npm_detail")   return ToolPkgGetNpmDetail(*pkg_session_, args);
@@ -459,7 +571,7 @@ json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args
 
 // ============ Papers with Code 工具分发(6 个 pwc_* 工具: 5 原始 + 1 分层) ============
 json McpServer::dispatch_pwc_tool(const std::string& tool_name, const json& args) {
-    if (!pwc_session_) return McpError("ERROR: PapersWithCode session not initialized. Start with --pwc-profile <DIR>.");
+    if (!ensure_pwc_session()) return McpError("ERROR: PapersWithCode session not initialized. Start with --pwc-profile <DIR>.");
     try {
         if (tool_name == "pwc_search_papers")    return ToolPwcSearchPapers(*pwc_session_, args);
         if (tool_name == "pwc_get_paper_detail") return ToolPwcGetPaperDetail(*pwc_session_, args);
@@ -475,7 +587,7 @@ json McpServer::dispatch_pwc_tool(const std::string& tool_name, const json& args
 
 // ============ Hugging Face 工具分发(9 个 hf_* 工具: 7 原始 + 2 分层) ============
 json McpServer::dispatch_hf_tool(const std::string& tool_name, const json& args) {
-    if (!hf_session_) return McpError("ERROR: HuggingFace session not initialized. Start with --hf-profile <DIR>.");
+    if (!ensure_hf_session()) return McpError("ERROR: HuggingFace session not initialized. Start with --hf-profile <DIR>.");
     try {
         if (tool_name == "hf_search_models")    return ToolHfSearchModels(*hf_session_, args);
         if (tool_name == "hf_get_model_info")   return ToolHfGetModelInfo(*hf_session_, args);
@@ -494,7 +606,7 @@ json McpServer::dispatch_hf_tool(const std::string& tool_name, const json& args)
 
 // ============ Semantic Scholar 工具分发(7 个 s2_* 工具: 6 原始 + 1 分层) ============
 json McpServer::dispatch_s2_tool(const std::string& tool_name, const json& args) {
-    if (!s2_session_) return McpError("ERROR: SemanticScholar session not initialized. Start with --s2-profile <DIR>.");
+    if (!ensure_s2_session()) return McpError("ERROR: SemanticScholar session not initialized. Start with --s2-profile <DIR>.");
     try {
         if (tool_name == "s2_search_papers")     return ToolS2SearchPapers(*s2_session_, args);
         if (tool_name == "s2_get_paper_detail")   return ToolS2GetPaperDetail(*s2_session_, args);
@@ -511,7 +623,7 @@ json McpServer::dispatch_s2_tool(const std::string& tool_name, const json& args)
 
 // ============ Stack Overflow 工具分发(6 个 so_* 工具: 5 原始 + 1 分层) ============
 json McpServer::dispatch_so_tool(const std::string& tool_name, const json& args) {
-    if (!so_session_) return McpError("ERROR: StackOverflow session not initialized. Start with --so-profile <DIR>.");
+    if (!ensure_so_session()) return McpError("ERROR: StackOverflow session not initialized. Start with --so-profile <DIR>.");
     try {
         if (tool_name == "so_search_questions")  return ToolSoSearchQuestions(*so_session_, args);
         if (tool_name == "so_get_question_detail") return ToolSoGetQuestionDetail(*so_session_, args);
@@ -577,6 +689,10 @@ int McpServer::run() {
 
 std::string McpServer::handle_request(const json& request) {
     // 校验 JSON-RPC 2.0
+    {
+        std::string m = request.value("method", std::string());
+        DBG_LOG("rpc") << "handle_request: method=" << m << " has_id=" << request.contains("id");
+    }
     if (!request.is_object() || !request.contains("jsonrpc")) {
         json err = {
             {"jsonrpc", "2.0"},
@@ -632,66 +748,15 @@ std::string McpServer::handle_request(const json& request) {
 }
 
 json McpServer::handle_initialize(const json& params) {
-    // 通过 instructions 字段把 system_prompt.md 注入 LLM 上下文
-    // MCP 协议规定:initialize result.instructions 会被客户端作为 system prompt 使用
-    // 这是让 LLM 知道"必须先调 github_get_branches 再按分支取提交"的唯一可靠途径
-    // 因为 server 本身没有机会主动向 LLM 发送消息,只能在握手时一次性提供
-    std::string instructions;
-    const char* prompt_paths[] = {
-        // 1. 环境变量显式指定(最高优先级)
-        nullptr
-    };
-    const char* env_path = std::getenv("GITHUB_RESEARCH_SYSTEM_PROMPT");
-    std::string env_path_str;
-    if (env_path && env_path[0] != '\0') {
-        env_path_str = env_path;
-        prompt_paths[0] = env_path_str.c_str();
-    }
-
-    // 候选路径列表(exe 同级 / exe 父目录 / 当前工作目录)
-    std::vector<std::string> candidates;
-    if (prompt_paths[0]) candidates.push_back(prompt_paths[0]);
-
-    // exe 同级目录
-    wchar_t exe_path_w[MAX_PATH] = {0};
-    GetModuleFileNameW(nullptr, exe_path_w, MAX_PATH);
-    std::wstring exe_dir_w(exe_path_w);
-    size_t last_sep = exe_dir_w.find_last_of(L"\\/");
-    if (last_sep != std::wstring::npos) exe_dir_w = exe_dir_w.substr(0, last_sep);
-    std::string exe_dir(exe_dir_w.begin(), exe_dir_w.end());
-    candidates.push_back(exe_dir + "\\system_prompt.md");
-
-    // exe 父目录(开发构建时 build\Release\.. = 项目根)
-    size_t parent_sep = exe_dir.find_last_of("\\/");
-    if (parent_sep != std::string::npos) {
-        std::string parent_dir = exe_dir.substr(0, parent_sep);
-        candidates.push_back(parent_dir + "\\system_prompt.md");
-    }
-
-    // 当前工作目录
-    candidates.push_back("system_prompt.md");
-
-    for (const auto& path : candidates) {
-        std::ifstream ifs(path);
-        if (ifs.is_open()) {
-            std::stringstream ss;
-            ss << ifs.rdbuf();
-            instructions = ss.str();
-            std::cerr << "[mcp] loaded system_prompt from: " << path
-                      << " (" << instructions.size() << " bytes)" << std::endl;
-            break;
-        }
-    }
-
-    if (instructions.empty()) {
-        // 没找到文件也不能让 LLM 裸跑,给一个最小提示
-        instructions = "You are a GitHub deep research assistant. "
-                       "CRITICAL: Always call github_get_branches before github_get_commits, "
-                       "then call github_get_commits per-branch with branch=<name> parameter. "
-                       "Default branch commits may be stale; active development is often on "
-                       "non-default branches (e.g. codex/cxcore-integration).";
-        std::cerr << "[mcp] WARNING: system_prompt.md not found, using minimal fallback" << std::endl;
-    }
+    // instructions:仅提供简短描述(不注入完整 system_prompt.md)
+    // 完整 prompt 曾通过此字段注入,但大体积 instructions(>9KB)会导致
+    // 部分 MCP 客户端(如 llama.cpp b10333 HTTP 客户端)栈缓冲区溢出崩溃。
+    // MCP 协议规定 instructions 是简短描述,不应承载完整 system prompt。
+    std::string instructions =
+        "GitHub deep research assistant. 8 sources: GitHub API + arXiv/HN/Pkg/PWC/HF/S2/SO (WebView2). "
+        "CRITICAL: always call github_get_branches before github_get_commits, "
+        "then call github_get_commits per-branch with branch=<name>. "
+        "Default branch commits may be stale; active development is often on non-default branches.";
 
     return {
         {"protocolVersion", "2024-11-05"},
@@ -1286,6 +1351,52 @@ json McpServer::handle_tools_list() {
                     {"required", json::array({"hn_id"})}
                 })}
             },
+            // ========== Research DeepDive (跨源次级链接发现 + 批量抓取) ==========
+            {
+                {"name", "research_deep_dive"},
+                {"description",
+                 "Comprehensive secondary web analysis driven by graph traversal. "
+                 "STEP 1 (SEED DISCOVERY): Resolve seed_query into starting points — "
+                 "prefix 'hn:XXXX' or pure numeric id resolves to HN story (title + comments + article body via hn_fetch_detailed_story); "
+                 "otherwise lookup entities by name or fuzzy search in the entity index. "
+                 "STEP 2 (GRAPH TRAVERSE): 2-hop BFS on entity graph to collect all related entities. "
+                 "STEP 3 (URL AGGREGATION): Extract URLs from HN comments/article, entity metadata fields, "
+                 "graph-traversed entities — normalize, deduplicate, filter low-value (login pages, "
+                 "trackers, binary assets, short URLs), rank by (citation_count × relation_weight). "
+                 "STEP 4 (SECONDARY FETCH): Navigate and scrape top-N secondary URLs (TTL=72h cache). "
+                 "Use this tool when the initial story mentions multiple related articles, papers, "
+                 "repos, or blog posts that you want to read in full before drawing conclusions."
+                },
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"seed_query", json::object({
+                            {"type", "string"},
+                            {"description",
+                             "Research starting point. Options: (1) 'hn:42000' or numeric '42000' = HN story id; "
+                             "(2) exact entity canonical_name (e.g. 'hn:42000'); "
+                             "(3) keyword / topic name for entity search (falls back to fuzzy match)."}
+                        })},
+                        {"max_secondary_links", json::object({
+                            {"type", "integer"}, {"default", 5}, {"minimum", 1}, {"maximum", 15},
+                            {"description", "Maximum number of secondary web pages to fetch after ranking."}
+                        })},
+                        {"page_text_max_chars", json::object({
+                            {"type", "integer"}, {"default", 15000}, {"minimum", 1000}, {"maximum", 50000},
+                            {"description", "Plaintext character cap per secondary web page."}
+                        })},
+                        {"graph_max_depth", json::object({
+                            {"type", "integer"}, {"default", 2}, {"minimum", 1}, {"maximum", 3},
+                            {"description", "BFS traversal depth from seed entities (higher = wider coverage, slower)."}
+                        })},
+                        {"force_refresh", json::object({
+                            {"type", "boolean"}, {"default", false},
+                            {"description", "If true, ignore all 72h caches and re-fetch every page."}
+                        })}
+                    })},
+                    {"required", json::array({"seed_query"})}
+                })}
+            },
             // ========== Package Registry 工具集(4 个 pkg_*) ==========
             {
                 {"name", "pkg_search_npm"},
@@ -1694,6 +1805,7 @@ json McpServer::handle_tools_call(const json& params) {
     json args = params.value("arguments", json::object());
     if (!args.is_object()) args = json::object();
 
+    DBG_LOG("rpc") << "handle_tools_call: name=" << name;
     // 按前缀路由到各源 dispatcher
     if (name.rfind("arxiv_", 0) == 0)  return dispatch_arxiv_tool(name, args);
     if (name.rfind("hn_", 0) == 0)     return dispatch_hn_tool(name, args);
@@ -1702,6 +1814,7 @@ json McpServer::handle_tools_call(const json& params) {
     if (name.rfind("hf_", 0) == 0)     return dispatch_hf_tool(name, args);
     if (name.rfind("s2_", 0) == 0)     return dispatch_s2_tool(name, args);
     if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
+    if (name.rfind("research_", 0) == 0) return dispatch_research_tool(name, args);
 
     // GitHub 工具走原路径
     return dispatch_tool_call(client_, params);
@@ -1713,6 +1826,7 @@ McpServer::HttpResult McpServer::handle_http_request(const std::string& method,
                                                      const std::string& path,
                                                      const std::string& body) {
     HttpResult result;
+    DBG_LOG("http") << "handle_http_request: " << method << " " << path << " body_len=" << body.size();
 
     // GET / -> 服务状态
     if (method == "GET" && (path == "/" || path == "/health")) {
@@ -1746,6 +1860,23 @@ McpServer::HttpResult McpServer::handle_http_request(const std::string& method,
         json list = handle_tools_list();
         result.body = list.dump();
         result.content_type = "application/json";
+        return result;
+    }
+
+    // GET /mcp -> Streamable HTTP MCP 的 SSE 探测
+    // research-mcp 只支持旧版 HTTP JSON-RPC (MCP 2024-11-05),不支持 SSE
+    // 返回 405 Method Not Allowed 明确告知客户端不支持 SSE,避免客户端无限重试崩溃
+    if (method == "GET" && path == "/mcp") {
+        DBG_LOG("http") << "GET /mcp: returning 405 (SSE not supported)";
+        result.status = 405;
+        result.content_type = "application/json";
+        result.body = json{
+            {"jsonrpc", "2.0"},
+            {"id", nullptr},
+            {"error", {{"code", -32000}, {"message", "SSE/streamable HTTP not supported. Use POST /mcp for JSON-RPC 2.0."}}}
+        }.dump();
+        // 通过自定义 header 告知客户端只支持 POST
+        result.extra_headers = "Allow: POST\r\n";
         return result;
     }
 
@@ -1813,6 +1944,7 @@ int McpServer::run_http(int port) {
         http_resp.status = mcp_resp.status;
         http_resp.body = mcp_resp.body;
         http_resp.content_type = mcp_resp.content_type;
+        http_resp.extra_headers = mcp_resp.extra_headers;
 
         // 检测 shutdown 请求 -> 触发 server 停止
         if (req.method == "POST" && req.path == "/mcp") {

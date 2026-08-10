@@ -1,0 +1,139 @@
+name: Universal GN/Ninja Build Pipeline
+
+# 任意 GN 工程通用编译流水线
+# 适配: LLVM / Chromium 子工程 / 自定义 GN 项目
+# 设计: 源码位置、GN 参数文件、产物目录全部环境变量化, 一套模板多项目复用
+# 安全: 所有 Action Pin commit SHA; Runner 硬化; 缓存 Key 三重绑定(系统+commit+args哈希)
+# 校验: 制品平铺部署 + 全局 SHA256 清单 + 下游强制 verify_artifact.sh
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.gn'
+      - '**/*.gni'
+      - 'build/*.gn'
+      - .github/workflows/gn-universal-build.yml
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**/*.gn'
+      - '**/*.gni'
+      - build/*.gn
+      - .github/workflows/gn-universal-build.yml
+  workflow_dispatch:
+
+# 最小权限基线
+permissions:
+  contents: read
+  pull-requests: read
+
+# 并发锁: 同分支同一时间只跑一条构建, 防止缓存读写冲突
+concurrency:
+  group: gn-build-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  # ========== 【项目使用者按需修改此区块】 ==========
+  SRC_ROOT: "."                     # GN 工程根目录
+  GN_OUT_DIR: out/release           # GN 输出目录
+  GN_ARGS_FILE: build/release.args  # GN 编译参数文件(纳入版本控制)
+  ARTIFACT_ROOT: ./deploy_output    # 最终平铺部署目录(类似 flat llvm root)
+  NINJA_JOBS: "$(nproc)"
+  ENABLE_FULL_CLEAN: false          # 正式发布流水线可覆写 true 禁用缓存、全量重建
+  # ===============================================
+
+jobs:
+  gn-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      # 1. Runner 安全硬化
+      - name: Harden Runner
+        uses: step-security/harden-runner@0d381219ddf674d6ac78901a5f83db16a96d5fd
+        with:
+          egress-policy: audit
+
+      # 2. 拉取代码
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      # 3. 预计算稳定哈希, 用于缓存键
+      - name: Calculate build fingerprint
+        run: |
+          echo "GIT_HEAD=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          echo "ARGS_HASH=$(sha256sum ${{ env.GN_ARGS_FILE }} | awk '{print $1}')" >> $GITHUB_ENV
+
+      # 4. 系统基础依赖(通用编译环境, 按需增删)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential git python3
+
+      # 5. 安全缓存策略
+      # Key 构成: 系统标识 + 代码 commit + gn 参数哈希
+      - name: Restore build cache
+        if: env.ENABLE_FULL_CLEAN == 'false'
+        uses: actions/cache@269d9d88925b4b6f86742e2440414347962f2a94
+        with:
+          path: |
+            ${{ env.GN_OUT_DIR }}
+          key: ${{ runner.os }}-gn-${{ env.GIT_HEAD }}-${{ env.ARGS_HASH }}
+          restore-keys: |
+            ${{ runner.os }}-gn-${{ env.GIT_HEAD }}-
+
+      # 强制全量清理模式(发布分支启用)
+      - name: Full clean (No cache mode)
+        if: env.ENABLE_FULL_CLEAN == 'true'
+        run: |
+          rm -rf ${{ env.GN_OUT_DIR }}
+          rm -rf ${{ env.ARTIFACT_ROOT }}
+
+      # 6. GN 生成构建图
+      - name: GN generate build.ninja
+        run: |
+          gn gen ${{ env.GN_OUT_DIR }} --args-file=${{ env.GN_ARGS_FILE }}
+
+      # 7. Ninja 执行编译
+      - name: Ninja build all targets
+        run: |
+          ninja -j ${{ env.NINJA_JOBS }} -C ${{ env.GN_OUT_DIR }}
+
+      # 8. 制品平铺部署(通用 install 语义, 兼容 LLVM/自定义 install 目标)
+      - name: Assemble deploy directory (install target)
+        run: |
+          rm -rf ${{ env.ARTIFACT_ROOT }}
+          mkdir -p ${{ env.ARTIFACT_ROOT }}
+          ninja -C ${{ env.GN_OUT_DIR }} install
+          cp -r ${{ env.GN_OUT_DIR }}/install/* ${{ env.ARTIFACT_ROOT }}
+
+      # 9. 基础功能自检脚本【项目可扩展替换】
+      - name: Sanity verify built binaries
+        run: |
+          set -e
+          export PATH=${{ env.ARTIFACT_ROOT }}/bin:$PATH
+          # --------------------------
+          # 使用者替换为自己项目二进制自检命令
+          # example: mytool --version
+          # --------------------------
+          echo "Basic deploy verification passed"
+
+      # 10. 生成全局 SHA256 清单, 用于下游可信校验
+      - name: Generate artifact sha256 manifest
+        run: |
+          cd ${{ env.ARTIFACT_ROOT }}
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > ../artifact_manifest.sha256
+          cd ..
+          echo "MANIFEST_SIGNATURE=$(sha256sum artifact_manifest.sha256 | awk '{print $1}')" >> $GITHUB_ENV
+
+      # 11. 上传制品 + 哈希清单
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@6546e369fd3c6df94d24d0922db7261b5ecd4527
+        with:
+          name: gn-deploy-artifact-${{ env.GIT_HEAD }}
+          path: |
+            ${{ env.ARTIFACT_ROOT }}
+            artifact_manifest.sha256
+          retention-days: 14

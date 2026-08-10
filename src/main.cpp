@@ -1084,24 +1084,19 @@ int main(int argc, char* argv[]) {
         server.init_github_profile(profiles.gh);
     }
 
-    // 各源 WebView 会话按需初始化
-    auto tryInit = [&](const std::string& name, const std::string& path,
-                       auto initFn) {
-        if (path.empty()) return;
-        std::cerr << "[mcp] init " << name << " session: " << path << std::endl;
-        if (!initFn(s2w(path), proxy_url)) {
-            std::cerr << "[mcp] WARNING: " << name << " session init FAILED"
-                      << std::endl;
-        }
-    };
-
-    tryInit("arXiv",  profiles.arxiv, [&](auto d, auto p) { return server.init_arxiv(d, p); });
-    tryInit("HN",     profiles.hn,    [&](auto d, auto p) { return server.init_hackernews(d, p); });
-    tryInit("Package",profiles.pkg,   [&](auto d, auto p) { return server.init_package(d, p); });
-    tryInit("PWC",    profiles.pwc,   [&](auto d, auto p) { return server.init_paperswithcode(d, p); });
-    tryInit("HF",     profiles.hf,    [&](auto d, auto p) { return server.init_huggingface(d, p); });
-    tryInit("S2",     profiles.s2,    [&](auto d, auto p) { return server.init_semanticscholar(d, p); });
-    tryInit("SO",     profiles.so,    [&](auto d, auto p) { return server.init_stackoverflow(d, p); });
+    // 各源 profile 路径交给 McpServer,首次 tool 调用时懒加载 WebView2 会话
+    // 这样 initialize/tools/list 能立即响应,不被 7 个 WebView2 初始化阻塞
+    github_research::McpServer::ProfilePaths ppaths;
+    ppaths.arxiv = profiles.arxiv;
+    ppaths.hn    = profiles.hn;
+    ppaths.pkg   = profiles.pkg;
+    ppaths.pwc   = profiles.pwc;
+    ppaths.hf    = profiles.hf;
+    ppaths.s2    = profiles.s2;
+    ppaths.so    = profiles.so;
+    server.set_profiles(ppaths);
+    std::cerr << "[mcp] WebView2 sessions will be lazy-initialized on first tool call"
+              << std::endl;
 
     if (port > 0) return server.run_http(port);
     return server.run();

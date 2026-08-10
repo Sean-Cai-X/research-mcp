@@ -20,6 +20,7 @@ struct HttpServerResponse {
     int status = 200;
     std::string body;
     std::string content_type = "application/json";
+    std::string extra_headers;  // 附加 HTTP header(如 "Allow: POST\r\n"),已含 CRLF
 };
 
 // 简单的同步 HTTP/1.1 服务器(单线程串行处理)

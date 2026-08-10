@@ -33,6 +33,13 @@ public:
         client_.set_user_data_dir(userDataDir);
     }
 
+    // ============ 各源 profile 路径(懒加载用) ============
+    // 启动时不初始化任何 WebView2 会话,首次 tool 调用时按需创建
+    struct ProfilePaths {
+        std::string arxiv, hn, pkg, pwc, hf, s2, so;
+    };
+    void set_profiles(const ProfilePaths& paths) { profile_paths_ = paths; }
+
     // ============ 各源 WebView 会话初始化(可选,按需启动) ============
     // 每个源使用独立 UserData 目录,Cookie/缓存完全隔离
 
@@ -74,6 +81,7 @@ public:
         int status = 200;
         std::string body;
         std::string content_type = "application/json";
+        std::string extra_headers;  // 附加 HTTP header(如 "Allow: POST\r\n"),已含 CRLF
     };
     HttpResult handle_http_request(const std::string& method,
                                    const std::string& path,
@@ -93,6 +101,7 @@ private:
     json dispatch_hf_tool(const std::string& tool_name, const json& args);
     json dispatch_s2_tool(const std::string& tool_name, const json& args);
     json dispatch_so_tool(const std::string& tool_name, const json& args);
+    json dispatch_research_tool(const std::string& tool_name, const json& args);
 
     // 通用 init/shutdown 辅助
     bool init_session(std::unique_ptr<WebViewSession>& session,
@@ -100,6 +109,16 @@ private:
                       const std::string& proxy_url,
                       const char* logName);
     void shutdown_session(std::unique_ptr<WebViewSession>& session, const char* logName);
+
+    // 懒加载:首次 tool 调用时按 profile 路径初始化对应会话
+    // 返回 false 表示该源未配置 profile 或初始化失败
+    bool ensure_arxiv_session();
+    bool ensure_hn_session();
+    bool ensure_pkg_session();
+    bool ensure_pwc_session();
+    bool ensure_hf_session();
+    bool ensure_s2_session();
+    bool ensure_so_session();
 
     bool read_line(std::string& line);
     void write_line(const std::string& line);
@@ -118,6 +137,7 @@ private:
 
     std::string proxy_url_;
     std::string github_profile_dir_;  // GitHub 后端独立 user data dir
+    ProfilePaths profile_paths_;     // 各源 profile 路径(懒加载用)
     bool initialized_ = false;
 };
 

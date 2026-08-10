@@ -108,14 +108,31 @@ static bool parse_http_request(const std::string& raw, HttpRequest& req) {
     return true;
 }
 
+// HTTP 状态码 -> 原因短语
+static const char* http_status_reason(int status) {
+    switch (status) {
+        case 200: return "OK";
+        case 202: return "Accepted";
+        case 400: return "Bad Request";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 500: return "Internal Server Error";
+        default:  return "OK";
+    }
+}
+
 static std::string build_http_response(const HttpServerResponse& resp) {
     std::ostringstream oss;
-    oss << "HTTP/1.1 " << resp.status << " OK\r\n";
+    oss << "HTTP/1.1 " << resp.status << " " << http_status_reason(resp.status) << "\r\n";
     oss << "Content-Type: " << resp.content_type << "\r\n";
     oss << "Content-Length: " << resp.body.size() << "\r\n";
     oss << "Access-Control-Allow-Origin: *\r\n";
     oss << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
     oss << "Access-Control-Allow-Headers: Content-Type\r\n";
+    // 附加自定义 header(如 Allow: POST)
+    if (!resp.extra_headers.empty()) {
+        oss << resp.extra_headers;
+    }
     oss << "Connection: close\r\n";
     oss << "\r\n";
     oss << resp.body;

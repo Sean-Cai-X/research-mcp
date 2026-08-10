@@ -91,6 +91,7 @@ add_executable(research-mcp
     src/stackoverflow_tools.cpp
     src/formatters.cpp
     src/string_utils.cpp
+    src/research_deep_dive.cpp
     third_party/sqlite/sqlite3.c
 )
 

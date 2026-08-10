@@ -1078,6 +1078,115 @@ mkdir -Force ./profiles/gh,./profiles/arxiv,./profiles/hn,./profiles/pkg,./profi
   --proxy http://127.0.0.1:7897
 ```
 
+## 通用 GN/Ninja 编译流水线模板(完成案例)
+
+适配 **任意 GN 工程**(LLVM / Chromium 子工程 / 自定义 GN 项目), 统一抽象编译语义, 内置 **安全缓存 / 哈希校验 / 制品清单 / Runner 加固**。可直接交付 Trae 标准化落地; 通过环境变量切换工程路径、编译参数、输出目录, 一套模板多项目复用。
+
+### 设计思想
+
+1. 把「源码位置、GN 参数文件、产物目录」全部抽成环境变量, 不写死 LLVM 相关路径
+2. 缓存 Key 绑定三大因子: **系统标识 + GN 参数哈希 + 源码版本哈希**
+3. 标准化四阶段: **环境加固 → 构建 → 制品平铺/组装 → 功能校验 + 哈希清单生成**
+4. 所有 Action Pin commit; 最小权限; 并发防缓存踩踏
+
+### 仓库标准目录规范(统一所有 GN 项目)
+
+```
+repo/
+├── build/
+│   ├── release.args    # GN Release 参数
+│   └── debug.args      # GN Debug 参数(可选)
+├── scripts/
+│   └── verify_artifact.sh
+├── .github/workflows/
+│   └── gn-universal-build.yml
+└── [GN 源码根目录: BUILD.gn / .gn]
+```
+
+### 流水线文件清单
+
+| 文件 | 用途 |
+|---|---|
+| [.github/workflows/gn-universal-build.yml](.github/workflows/gn-universal-build.yml) | 通用 GN/Ninja 编译流水线 |
+| [scripts/verify_artifact.sh](scripts/verify_artifact.sh) | 下游制品完整性校验脚本 |
+| [build/release.args](build/release.args) | GN Release 参数模板 |
+
+### 流水线 11 步标准流程
+
+1. **Harden Runner** — `step-security/harden-runner@0d381219` 网络出口审计
+2. **Checkout source** — `actions/checkout@34e11487` fetch-depth=0
+3. **Calculate build fingerprint** — 计算 `GIT_HEAD` + `ARGS_HASH`(参数文件 SHA256)
+4. **Install system dependencies** — `build-essential git python3`
+5. **Restore build cache** — `actions/cache@269d9d88` Key 三重绑定 `os-gn-head-args_hash`
+6. **Full clean (No cache mode)** — `ENABLE_FULL_CLEAN=true` 时禁用缓存
+7. **GN generate build.ninja** — `gn gen out/release --args-file=build/release.args`
+8. **Ninja build all targets** — `ninja -j $(nproc) -C out/release`
+9. **Assemble deploy directory** — `ninja install` + 平铺到 `deploy_output/`
+10. **Sanity verify built binaries** — 项目专属自检(可替换)
+11. **Generate artifact sha256 manifest** — `find | sort | xargs sha256sum` 生成全局清单
+12. **Upload build artifacts** — `actions/upload-artifact@6546e369` 保留 14 天
+
+### build/release.args 通用 GN 基础模板
+
+```gn
+is_optimized = true
+is_debug = false
+use_debug_dwarf = false
+symbol_level = 0
+strip_output = true
+```
+
+### 下游校验脚本用法
+
+```bash
+# 下游流水线拉取制品后强制调用
+./scripts/verify_artifact.sh ./deploy_output ../artifact_manifest.sha256
+```
+
+校验流程:
+1. 文件哈希清单逐条 `sha256sum --check`
+2. 任意不匹配立即终止
+3. 通过后追加项目专属二进制自检(可选)
+
+### Trae 落地强制约束(标准化规则)
+
+1. **禁止硬编码项目路径**, 全部通过 workflow env 顶层配置
+2. 发布流水线调用 workflow 时, 传入 `ENABLE_FULL_CLEAN: true`, 放弃缓存、纯净构建
+3. 所有第三方 Action 必须锁定完整 commit SHA, 禁止 `@vX`
+4. 下游使用制品前 **必须执行 verify_artifact.sh**, 校验不通过直接终止
+5. 缓存 Key 三重绑定: 系统 + git commit + args 文件哈希, 避免参数变更后加载旧产物
+6. 构建全程不使用 root/sudo
+
+### 安全特性清单
+
+| 特性 | 实现 |
+|---|---|
+| **哈希校验** | 全局 SHA256 清单 + 下游强制 verify |
+| **安全缓存** | Key 三重绑定 + 并发锁 + 全量清理模式 |
+| **Runner 硬化** | step-security/harden-runner egress-policy=audit |
+| **最小权限** | `contents: read` + `pull-requests: read` |
+| **Action Pin SHA** | 全部锁定 commit SHA, 禁止 `@vX` 浮动标签 |
+| **构建完整性自检** | Sanity verify 步骤 + manifest signature |
+
+### 多项目复用技巧
+
+不同仓库只需要修改 workflow 顶部 `env` 区块, 其余逻辑完全不用改动:
+
+```yaml
+env:
+  SRC_ROOT: "."                     # 改这里
+  GN_OUT_DIR: out/release           # 改这里
+  GN_ARGS_FILE: build/release.args  # 改这里
+  ARTIFACT_ROOT: ./deploy_output    # 改这里
+```
+
+### 扩展可选能力(后续迭代)
+
+- 支持多配置并行构建(Debug / Release 矩阵)
+- 接入 sccache 加速增量编译
+- 增加容器隔离 `container: ubuntu:22.04`
+- 制品启用 gh attestation 签名(SLSA 合规)
+
 ## 许可
 
 随 DeerFlow 仓库分发。
