@@ -11,7 +11,7 @@
 #include <filesystem>
 
 static void print_help() {
-    std::cerr << "research-mcp v0.3.0\n"
+    std::cerr << "research-mcp v0.3.2\n"
               << "9-source unified research MCP server (libcurl + WebView2 + Kiwix)\n"
               << "Sources: Kiwix(offline) + GitHub + arXiv + HackerNews + npm/PyPI\n"
               << "         + PapersWithCode + HuggingFace + SemanticScholar + StackOverflow\n\n"
