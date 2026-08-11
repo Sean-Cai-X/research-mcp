@@ -1024,6 +1024,66 @@ llama.cpp 通过 `--mcp http://host:port/mcp` 挂载后,LLM 可直接识别语�
 | `<按标题 <title> 查找 stackoverflow 相似问题>` | `so_get_similar` |
 | `<抓取 stackoverflow 问题 <question_id> 的详情并写入缓存+实体注册>` | `so_fetch_question_detail` |
 
+### Wiki Explorer 源(3 个模板,离线优先 + 9 源递进)
+
+> 调用范式（严格递进）: `wiki_discover`（探测清单，优先选 is_local=true）→ `wiki_read`（精读单篇）→ 需要拓展时 `wiki_scan`（局部发散），禁止跳过 discover 直接全仓 scan。
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<在 9 源中探测 <关键词/百科词条> / 仓库 <owner/repo> 的文档资源清单,优先本地 Kiwix>` | `wiki_discover` |
+| `<精读 canonical_uri 为 <uri> 的文档（自动缓存+降级），或强制刷新 force_refresh=true>` | `wiki_read` |
+| `<以根资源 <root_canonical_uri> 为中心，围绕子路径 <sub_path> 发散扫描深度 <D>，最多 <N> 页>` | `wiki_scan` |
+
+#### Wiki Explorer 调用链示例(离线百科优先 → 联网兜底)
+
+**用户请求**：`研究一下 Transformer 架构的论文和维基百科解释，优先本地资源`
+
+```
+1. <在 9 源中探测 Transformer / 仓库 owner/repo 的文档资源清单,优先本地 Kiwix>
+   → wiki_discover(query="Transformer architecture", repo="")
+   返回:
+     - resources[0]: canonical_uri="kiwix://wikipedia_en/Transformer_(machine_learning)",
+                     title="Transformer (machine learning)", source_id="kiwix_local",
+                     is_local=true, snippet="...attention is all you need..."
+     - resources[1]: canonical_uri="github://harvardnlp/annotated-transformer/README.md",
+                     title="The Annotated Transformer", source_id="git_raw", is_local=false
+     - resources[2]: canonical_uri="arxiv://1706.03762",
+                     title="Attention Is All You Need", source_id="arxiv", is_local=false
+
+2. <精读 canonical_uri 为 kiwix://wikipedia_en/Transformer_(machine_learning) 的文档>
+   → wiki_read(target_uri="kiwix://wikipedia_en/Transformer_(machine_learning)", force_refresh=false)
+   返回: title, content_markdown（维基百科全文，本地 Kiwix 无外网请求）,
+         meta={from_cache:false, source_id:"kiwix_local", is_stale:false}
+
+3. <精读 canonical_uri 为 arxiv://1706.03762 的论文>
+   → wiki_read(target_uri="arxiv://1706.03762")
+   返回: 论文标题、摘要、正文 Markdown；若 arxiv 抓取失败则自动降级到 web_search 源
+
+4. [可选拓展] <以根资源 kiwix://wikipedia_en/Transformer_(machine_learning) 为中心，
+               围绕子路径 "attention/self-attention" 发散扫描深度 2，最多 10 页>
+   → wiki_scan(root_canonical_uri="kiwix://wikipedia_en/Transformer_(machine_learning)",
+               sub_path="attention self-attention",
+               max_depth=2, max_pages=10, force_refresh=false)
+   返回: scanned_items 预览 + skipped_count + errors（单页失败不中断）
+```
+
+**用户请求(纯仓库文档)**：`分析一下 langchain-ai/langchain 仓库的文档结构和 docs 目录`
+
+```
+1. <在 9 源中探测 / 仓库 langchain-ai/langchain 的文档资源清单>
+   → wiki_discover(query="docs structure", repo="langchain-ai/langchain", repo_branch="main")
+   返回: github_api（目录结构清单）+ git_raw（docs/*.md 快速扫描）+ github_wiki（Wiki 页面）
+         合并后的 canonical_uri 列表
+
+2. <精读 canonical_uri 为 github://langchain-ai/langchain/main/docs/get_started/introduction.mdx 的文档>
+   → wiki_read(target_uri="github://langchain-ai/langchain/main/docs/get_started/introduction.mdx")
+
+3. [发散] <以根资源 introduction.mdx 为中心，围绕 "concepts/modules" 子路径扫描 2 层最多 15 页>
+   → wiki_scan(root_canonical_uri="github://langchain-ai/langchain/main/docs/get_started/introduction.mdx",
+               sub_path="concepts modules",
+               max_depth=2, max_pages=15)
+```
+
 ### llama.cpp server 集成示例
 
 ```powershell
