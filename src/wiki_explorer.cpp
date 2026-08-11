@@ -5,6 +5,25 @@
 
 namespace github_research {
 
+// =============================================================
+// Null-safe JSON accessors
+// nlohmann::json::value() throws type_error.302 when a key exists
+// but is null. LLM clients (e.g. llama.app) commonly pass null for
+// optional string/number params, so we guard with explicit checks.
+// =============================================================
+static std::string safe_str(const json& j, const char* key, const char* def = "") {
+    if (!j.contains(key) || j[key].is_null() || !j[key].is_string()) return def;
+    return j[key].get<std::string>();
+}
+static int safe_int(const json& j, const char* key, int def) {
+    if (!j.contains(key) || j[key].is_null() || !j[key].is_number_integer()) return def;
+    return j[key].get<int>();
+}
+static bool safe_bool(const json& j, const char* key, bool def = false) {
+    if (!j.contains(key) || j[key].is_null() || !j[key].is_boolean()) return def;
+    return j[key].get<bool>();
+}
+
 WikiExplorer::WikiExplorer(DataSourceRegistry& registry, CacheManager& cache)
     : registry_(registry), cache_(cache) {}
 
@@ -76,9 +95,9 @@ WikiExplorer::fetchWithCache(const std::string& canonical_uri, bool force_refres
 // Tool 1: wiki_discover
 // =============================================================
 json WikiExplorer::discover(const json& args) {
-    std::string repo = args.value("repo", "");
-    std::string query = args.value("query", "");
-    std::string branch = args.value("repo_branch", "main");
+    std::string repo = safe_str(args, "repo");
+    std::string query = safe_str(args, "query");
+    std::string branch = safe_str(args, "repo_branch", "main");
 
     json result;
     result["repo"] = repo;
@@ -170,8 +189,8 @@ json WikiExplorer::discover(const json& args) {
 // Tool 2: wiki_read
 // =============================================================
 json WikiExplorer::read(const json& args) {
-    std::string target_uri = args.value("target_uri", "");
-    bool force_refresh = args.value("force_refresh", false);
+    std::string target_uri = safe_str(args, "target_uri");
+    bool force_refresh = safe_bool(args, "force_refresh", false);
 
     json result;
 
@@ -223,11 +242,11 @@ json WikiExplorer::read(const json& args) {
 // Tool 3: wiki_scan
 // =============================================================
 json WikiExplorer::scan(const json& args) {
-    std::string root_uri = args.value("root_canonical_uri", "");
-    std::string sub_path = args.value("sub_path", "");
-    int max_depth = args.value("max_depth", 2);
-    int max_pages = args.value("max_pages", 15);
-    bool force_refresh = args.value("force_refresh", false);
+    std::string root_uri = safe_str(args, "root_canonical_uri");
+    std::string sub_path = safe_str(args, "sub_path");
+    int max_depth = safe_int(args, "max_depth", 2);
+    int max_pages = safe_int(args, "max_pages", 15);
+    bool force_refresh = safe_bool(args, "force_refresh", false);
 
     json result;
     result["root_uri"] = root_uri;
