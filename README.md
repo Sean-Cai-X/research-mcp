@@ -1,10 +1,10 @@
 # github-research-mcp (DeerFlow++)
 
-8 源统一研究 MCP 服务,基于 **混合技术栈(libcurl + WebView2)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
+9 源统一研究 MCP 服务,基于 **混合技术栈(libcurl + WebView2)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
 
 ## 特性
 
-- **8 源 67 个工具**:GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **9 源 71 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
 - **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走 **WebView2**(完整 Chromium 指纹、JS 渲染、DOM 提取)
 - **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
 - **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
@@ -273,6 +273,72 @@ hn_story:49186720 ─[mentions]─→ arxiv_paper:2510.01395 ─[authored_by]─
        └─[discussed_in]─→ hn_comment   └─[cited_by]─→ s2_paper:...
 ```
 
+## 9 源统一检索架构 (Wiki Explorer)
+
+Wiki Explorer 作为第 9 号源,引入 **Kiwix 本地离线维基镜像** 作为最高优先级数据源,与原有 8 源共同组成 **9 源统一检索链**,支持维基百科等离线知识库的本地高速访问。
+
+### 9 源优先级表
+
+| 优先级 | 源 ID | 说明 | 接入方式 |
+|---|---|---|---|
+| 1 | `kiwix_local` | Kiwix 本地离线维基服务器(最高优先级) | HTTP REST (Kiwix serve) |
+| 2 | `git_raw` | Git 仓库 raw 文件直链 | libcurl HTTP |
+| 3 | `github_wiki` | GitHub Wiki 页面 | WebView2 |
+| 4 | `web_crawler` | 通用网页爬虫(任意 URL) | WebView2 |
+| 5 | `github_api` | GitHub REST API(主源) | libcurl |
+| 6 | `arxiv` | arXiv 论文库 | WebView2 |
+| 7 | `web_search` | Web 搜索引擎(SERP) | WebView2 |
+| 8 | `local_fs` | 本地文件系统扫描 | 原生 C++ 文件 IO |
+| 9 | `git_clone` | Git clone 完整仓库 | libgit2 / shell 调用 |
+
+### Wiki Explorer 工具(3 个)
+
+| 工具名 | 功能 |
+|---|---|
+| `wiki_discover` | 搜索 Kiwix 本地索引,发现相关维基条目(关键词/标题/分类模糊匹配) |
+| `wiki_read` | 读取指定维基条目的完整正文(从 Kiwix 本地 ZIM 文件解析,零网络延迟) |
+| `wiki_scan` | 批量扫描维基分类/索引页,枚举属于某主题的所有条目列表 |
+
+### 优先级回退策略
+
+```
+用户请求
+  │
+  ▼
+[1] kiwix_local 查询 ──命中──► 返回结果(停止,不再查询下游源)
+  │
+  未命中
+  ▼
+[2] git_raw ──命中──► 返回
+  │ 未命中
+  ▼
+[3] github_wiki ──命中──► 返回
+  │ 未命中
+  ▼
+[4] web_crawler ──命中──► 返回
+  │ 未命中
+  ▼
+[5] github_api → [6] arxiv → [7] web_search → [8] local_fs → [9] git_clone
+  │
+  全部源未命中 / 失败
+  ▼
+SQLite 陈旧缓存(stale cache)返回(若 allow_stale=true,记录 stale_hit=true)
+```
+
+**核心规则**:
+- **Kiwix 命中即停止**:优先级 1 (`kiwix_local`) 一旦命中结果,直接返回并终止下游 8 个源的查询,避免不必要的网络请求
+- **逐级回退**:每个源按优先级顺序尝试,当前源返回空 / 超时 / 错误时自动切换到下一优先级
+- **陈旧缓存兜底**:所有 9 个源全部失败时,若 `set_fallback_policy` 配置了 `allow_stale=true`,返回 SQLite 中已过期但仍存在的历史缓存(TTL 由 `stale_ttl_hours` 控制,默认 7 天)
+- **结果写入缓存**:任何优先级源的成功结果都写入 SQLite 缓存层(`cache_entries` + `cache_blobs`),下次相同查询优先缓存命中
+
+### 配置方式
+
+Kiwix 本地服务器通过以下方式之一指定(优先级同代理设置):
+1. **命令行参数**:`--kiwix-url http://127.0.0.1:8080`(推荐)
+2. **环境变量**:`KIWIX_SERVER_URL=http://127.0.0.1:8080`
+
+未配置时,`kiwix_local` 源自动跳过(不启用 Wiki 工具),回退到优先级 2 及以下源。
+
 ## 二进制程序下载(无需自行编译)
 
 打 tag 推送后,GitHub Actions 云端自动编译并发布到 Release。直接下载即用,静态链接 MSVC CRT,纯净 Windows 10/11 x64 机器无需另装 VC++ 运行库。
@@ -287,7 +353,13 @@ hn_story:49186720 ─[mentions]─→ arxiv_paper:2510.01395 ─[authored_by]─
 .\research-mcp.exe --port 8765 --proxy http://127.0.0.1:7897
 ```
 
-> 目标机器仍需自带 Edge Runtime(Win10/11 默认已有)。如需 8 源全量模式,参见下文「启动」章节的 `--xxx-profile` 参数。
+启用 Kiwix 本地维基(搭配 --kiwix-url):
+
+```powershell
+.\research-mcp.exe --port 8765 --kiwix-url http://127.0.0.1:8080 --proxy http://127.0.0.1:7897
+```
+
+> 目标机器仍需自带 Edge Runtime(Win10/11 默认已有)。如需 9 源全量模式,参见下文「启动」章节的 `--xxx-profile` 参数。
 
 ## 环境要求(自行编译时)
 
@@ -334,7 +406,7 @@ cmake --build build --config Release
   --proxy http://127.0.0.1:7897
 ```
 
-### 8 源全量模式(推荐)
+### 9 源全量模式(推荐)
 
 ```powershell
 .\research-mcp.exe --port 8765 `
@@ -346,6 +418,7 @@ cmake --build build --config Release
   --hf-profile    ./profiles/hf `
   --s2-profile    ./profiles/s2 `
   --so-profile    ./profiles/so `
+  --kiwix-url     http://127.0.0.1:8080 `
   --proxy http://127.0.0.1:7897
 ```
 
@@ -372,7 +445,8 @@ cmake --build build --config Release
 |---|---|
 | `--port <PORT>` | HTTP MCP server 端口(默认:stdio 模式) |
 | `--proxy <URL>` | 代理 URL(应用到所有 WebView 会话) |
-| `--gh-profile <DIR>` | GitHub WebView user data dir(8 源隔离) |
+| `--kiwix-url <URL>` | Kiwix local server URL (e.g. http://127.0.0.1:8080) |
+| `--gh-profile <DIR>` | GitHub WebView user data dir(9 源隔离) |
 | `--arxiv-profile <DIR>` | 启用 arXiv WebView 会话 |
 | `--hn-profile <DIR>` | 启用 Hacker News WebView 会话 |
 | `--pkg-profile <DIR>` | 启用 npm/PyPI WebView 会话 |
@@ -420,7 +494,7 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 $body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 $r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
 "tools count: $($r.result.tools.Count)"
-# → tools count: 65
+# → tools count: 71
 ```
 
 ### arXiv 论文详情(支持 cache_hit)
@@ -534,7 +608,7 @@ $r.result.content[0].text
 
 失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
 
-## 工具列表(65 个)
+## 工具列表(71 个)
 
 ### GitHub(18 个)
 
@@ -641,6 +715,14 @@ $r.result.content[0].text
 | `so_get_similar` | 获取相似问题 |
 | `so_fetch_question_detail` | 问题详情 + 缓存(TTL=24h) + question 实体注册 + mentions 关系 + so_observed 时间快照 |
 
+### Wiki Explorer (3 个)
+
+| 工具 | 说明 |
+|---|---|
+| `wiki_discover` | 搜索 Kiwix 本地索引,发现相关维基条目(关键词 / 标题 / 分类模糊匹配) |
+| `wiki_read` | 读取指定维基条目的完整正文(从 Kiwix 本地 ZIM 解析,零网络延迟,支持 TOC / section 提取) |
+| `wiki_scan` | 批量扫描维基分类 / 索引页,枚举属于某主题的所有条目列表(分页遍历) |
+
 ## 客户端配置
 
 ### Claude Desktop / TRAE
@@ -663,7 +745,8 @@ $r.result.content[0].text
         "--proxy", "http://127.0.0.1:7897"
       ],
       "env": {
-        "GITHUB_TOKEN": "ghp_xxx"
+        "GITHUB_TOKEN": "ghp_xxx",
+        "KIWIX_SERVER_URL": "http://127.0.0.1:8080"
       }
     }
   }
@@ -679,7 +762,7 @@ llama-server.exe ^
   --mcp http://127.0.0.1:8765/mcp
 ```
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 59 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 71 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
 
 ## 协议兼容性
 
@@ -691,7 +774,7 @@ llama-server.exe ^
 | 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
 | CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
 | OPTIONS 预检 | ✅ | 自动返回 200 |
-| `tools/list` | ✅ | 59 个工具(8 源) |
+| `tools/list` | ✅ | 71 个工具(9 源) |
 | `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
 | `ping` | ✅ | 心跳保活 |
 | `shutdown` | ✅ | 触发 server 优雅停止 |
@@ -740,7 +823,7 @@ GitHub API 限流(每小时 60 次/未认证)。解决:
 
 ### `session not initialized`
 
-对应源的 `--xxx-profile` 参数未指定。检查启动命令是否包含全部 8 个 `--xxx-profile` 参数。
+对应源的 `--xxx-profile` 参数未指定。检查启动命令是否包含全部 9 个 `--xxx-profile` 参数。
 
 ### `fetch_result preview: {}`
 
@@ -806,7 +889,7 @@ cmake --build build --config Release --target test_smoke
 
 | 验证项 | 期望结果 |
 |---|---|
-| `tools/list` 返回工具数 | 59 |
+| `tools/list` 返回工具数 | 65 |
 | `arxiv_fetch_paper_detail` 首次调用 | 返回论文详情(无 `cache_hit` 字段) |
 | `arxiv_fetch_paper_detail` 二次调用 | `cache_hit=true` + `cache_expires_at` 时间戳 |
 | `hn_fetch_detailed_story` 返回 `source_url=arxiv.org` | 自动建立 `story -[mentions]-> paper` 跨源关系 |
@@ -821,7 +904,7 @@ cmake --build build --config Release --target test_smoke
 | HTTP 后端 | Python requests | WebView2(Chromium 内核) |
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
-| 数据源 | GitHub 单源 | 8 源统一接入 |
+| 数据源 | GitHub 单源 | 9 源统一接入 |
 | 缓存层 | 无 | SQLite WAL + 5 张表 + 188 项烟雾测试 |
 | 多源融合 | 无 | 字段级 UNION/LATEST 策略 + 熔断器 + 降级链 |
 | 关系图谱 | 无 | Entity Mapper + 跨源 mentions 自动建立 |
@@ -962,7 +1045,7 @@ llama.cpp 通过 `--mcp http://host:port/mcp` 挂载后,LLM 可直接识别语�
         "--so-profile", "./profiles/so",
         "--proxy", "http://127.0.0.1:7897"
       ],
-      "env": { "GITHUB_TOKEN": "ghp_xxx" }
+      "env": { "GITHUB_TOKEN": "ghp_xxx", "KIWIX_SERVER_URL": "http://127.0.0.1:8080" }
     }
   }
 }
@@ -1024,11 +1107,11 @@ llama-server.exe ^
 
 | 验证项 | 结果 | 说明 |
 |---|---|---|
-| GET `/` | ✅ | 返回 8 源状态(GitHub=true,其余需 --xxx-profile) |
-| GET `/tools` | ✅ | 返回 65 个工具(完整列表) |
-| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 65 个工具,JSON-RPC id=1 正确匹配 |
+| GET `/` | ✅ | 返回 9 源状态(GitHub=true,其余需 --xxx-profile) |
+| GET `/tools` | ✅ | 返回 71 个工具(完整列表) |
+| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 71 个工具,JSON-RPC id=1 正确匹配 |
 | 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
-| 完整 8 源 fetch 回调 | ✅ | 8 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
+| 完整 9 源 fetch 回调 | ✅ | 9 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
 | `github_module_timeline_analysis` ingest_first=false | ✅ | timeline_count=3 (research-mcp 仓库 src/tools.cpp) |
 | `github_module_timeline_analysis` ingest_first=true + branch | ✅ | timeline_count=35 (cxvision 仓库 codex/cxcore-integration 分支, FastMatch 签名匹配) |
 
@@ -1063,7 +1146,7 @@ llama-server.exe ^
 ### 执行命令
 
 ```powershell
-# 启动完整 8 源 HTTP Server(需先创建 profiles 目录)
+# 启动完整 9 源 HTTP Server(需先创建 profiles 目录)
 mkdir -Force ./profiles/gh,./profiles/arxiv,./profiles/hn,./profiles/pkg,./profiles/pwc,./profiles/hf,./profiles/s2,./profiles/so
 
 .\build\Release\research-mcp.exe --port 8765 `

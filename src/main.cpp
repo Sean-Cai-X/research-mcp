@@ -11,16 +11,16 @@
 #include <filesystem>
 
 static void print_help() {
-    std::cerr << "research-mcp v0.2.0\n"
-              << "8-source research MCP server (unified WebView2 backend)\n"
-              << "Sources: GitHub + arXiv + HackerNews + npm/PyPI + PapersWithCode\n"
-              << "         + HuggingFace + SemanticScholar + StackOverflow\n\n"
+    std::cerr << "research-mcp v0.3.0\n"
+              << "9-source unified research MCP server (libcurl + WebView2 + Kiwix)\n"
+              << "Sources: Kiwix(offline) + GitHub + arXiv + HackerNews + npm/PyPI\n"
+              << "         + PapersWithCode + HuggingFace + SemanticScholar + StackOverflow\n\n"
               << "Usage:\n"
               << "  research-mcp.exe [options]\n\n"
               << "Options:\n"
               << "  --port <PORT>              HTTP MCP server port (default: stdio mode)\n"
               << "  --proxy <URL>              Proxy URL (applies to all sessions)\n"
-              << "  --gh-profile <DIR>         GitHub WebView user data dir (8-source isolation)\n"
+              << "  --gh-profile <DIR>         GitHub WebView user data dir (9-source isolation)\n"
               << "  --arxiv-profile <DIR>      Enable arXiv WebView session\n"
               << "  --hn-profile <DIR>         Enable Hacker News WebView session\n"
               << "  --pkg-profile <DIR>        Enable npm/PyPI WebView session\n"
@@ -28,12 +28,13 @@ static void print_help() {
               << "  --hf-profile <DIR>         Enable Hugging Face WebView session\n"
               << "  --s2-profile <DIR>         Enable Semantic Scholar WebView session\n"
               << "  --so-profile <DIR>         Enable Stack Overflow WebView session\n"
+              << "  --kiwix-url <URL>          Kiwix local server URL (e.g. http://127.0.0.1:8080)\n"
               << "  --help                     Show this help\n\n"
               << "HTTP endpoints:\n"
               << "  POST /mcp        JSON-RPC 2.0\n"
               << "  GET  /           Service status (shows enabled sources)\n"
-              << "  GET  /tools      List all registered tools (49 total)\n\n"
-              << "Full example (all 8 sources):\n"
+              << "  GET  /tools      List all registered tools (71 total)\n\n"
+              << "Full example (all 9 sources):\n"
               << "  research-mcp.exe --port 8765 \\\n"
               << "    --gh-profile ./profiles/gh \\\n"
               << "    --arxiv-profile ./profiles/arxiv \\\n"
@@ -43,6 +44,7 @@ static void print_help() {
               << "    --hf-profile ./profiles/hf \\\n"
               << "    --s2-profile ./profiles/s2 \\\n"
               << "    --so-profile ./profiles/so \\\n"
+              << "    --kiwix-url http://127.0.0.1:8080 \\\n"
               << "    --proxy http://127.0.0.1:7897 \\\n"
               << "    --gh-token ghp_xxxxxxxxxxxx\n\n"
               << "Minimal (GitHub only, 13 tools):\n"
@@ -50,6 +52,7 @@ static void print_help() {
               << "Environment:\n"
               << "  GITHUB_TOKEN             Personal access token (optional, --gh-token overrides)\n"
               << "  GITHUB_RESEARCH_TIMEOUT  Request timeout seconds (default: 30)\n"
+              << "  KIWIX_SERVER_URL          Kiwix local server URL (default: none, --kiwix-url overrides)\n"
               << "  HTTPS_PROXY/HTTP_PROXY/ALL_PROXY  Proxy URL\n";
 }
 
@@ -88,6 +91,7 @@ int main(int argc, char* argv[]) {
     bool proxy_explicit = false;
     ProfileArgs profiles;
     bool cache_smoke_test = false;
+    std::string kiwix_url;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -125,6 +129,8 @@ int main(int argc, char* argv[]) {
             profiles.so = argv[++i];
         } else if (arg == "--gh-token" && i + 1 < argc) {
             token = std::string(argv[++i]);
+        } else if (arg == "--kiwix-url" && i + 1 < argc) {
+            kiwix_url = argv[++i];
         } else {
             std::cerr << "Unknown argument: " << arg << "\n\n";
             print_help();
@@ -133,6 +139,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (!proxy_explicit) proxy_url = read_proxy_from_env();
+
+    // Kiwix URL: --kiwix-url overrides env var
+    if (kiwix_url.empty()) {
+        const char* env_kiwix = std::getenv("KIWIX_SERVER_URL");
+        if (env_kiwix && env_kiwix[0]) kiwix_url = env_kiwix;
+    }
 
     // ── 初始化全局统一缓存层(WAL + 5 张表) ──
     github_research::CacheConfig cacheCfg;
@@ -1095,6 +1107,13 @@ int main(int argc, char* argv[]) {
     ppaths.s2    = profiles.s2;
     ppaths.so    = profiles.so;
     server.set_profiles(ppaths);
+
+    // Kiwix local server URL (priority 1 source in 9-source architecture)
+    if (!kiwix_url.empty()) {
+        server.set_kiwix_url(kiwix_url);
+        std::cerr << "[mcp] kiwix: " << kiwix_url << std::endl;
+    }
+
     std::cerr << "[mcp] WebView2 sessions will be lazy-initialized on first tool call"
               << std::endl;
 

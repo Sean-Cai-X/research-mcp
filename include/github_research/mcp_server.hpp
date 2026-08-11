@@ -6,6 +6,17 @@
 #include <nlohmann/json.hpp>
 #include "github_client.hpp"
 #include "webview_session.hpp"
+#include "datasource_registry.hpp"
+#include "wiki_explorer.hpp"
+#include "kiwix_source.hpp"
+#include "git_raw_source.hpp"
+#include "github_wiki_source.hpp"
+#include "web_crawler_source.hpp"
+#include "github_api_source.hpp"
+#include "arxiv_source.hpp"
+#include "web_search_source.hpp"
+#include "local_fs_source.hpp"
+#include "git_clone_source.hpp"
 
 namespace github_research {
 
@@ -39,6 +50,9 @@ public:
         std::string arxiv, hn, pkg, pwc, hf, s2, so;
     };
     void set_profiles(const ProfilePaths& paths) { profile_paths_ = paths; }
+
+    // ============ Kiwix local server URL ============
+    void set_kiwix_url(const std::string& url) { kiwix_url_ = url; }
 
     // ============ 各源 WebView 会话初始化(可选,按需启动) ============
     // 每个源使用独立 UserData 目录,Cookie/缓存完全隔离
@@ -102,6 +116,10 @@ private:
     json dispatch_s2_tool(const std::string& tool_name, const json& args);
     json dispatch_so_tool(const std::string& tool_name, const json& args);
     json dispatch_research_tool(const std::string& tool_name, const json& args);
+    json dispatch_wiki_tool(const std::string& tool_name, const json& args);
+
+    // Initialize 9-source datasource registry (lazy, on first wiki tool call)
+    void init_datasource_registry();
 
     // 通用 init/shutdown 辅助
     bool init_session(std::unique_ptr<WebViewSession>& session,
@@ -139,6 +157,13 @@ private:
     std::string github_profile_dir_;  // GitHub 后端独立 user data dir
     ProfilePaths profile_paths_;     // 各源 profile 路径(懒加载用)
     bool initialized_ = false;
+
+    // 9-source unified search architecture
+    std::string kiwix_url_;
+    std::unique_ptr<IHttpClient> shared_http_client_;
+    std::unique_ptr<DataSourceRegistry> datasource_registry_;
+    std::unique_ptr<WikiExplorer> wiki_explorer_;
+    bool datasource_initialized_ = false;
 };
 
 } // namespace github_research

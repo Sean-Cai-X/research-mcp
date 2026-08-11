@@ -554,6 +554,99 @@ json McpServer::dispatch_research_tool(const std::string& tool_name, const json&
     return McpError("ERROR: unknown research tool: " + tool_name);
 }
 
+// ============ Wiki tools (9-source unified search) ============
+void McpServer::init_datasource_registry() {
+    if (datasource_initialized_) return;
+    datasource_initialized_ = true;
+
+    DBG_LOG("wiki") << "init_datasource_registry: creating 9 sources";
+
+    // Create shared HTTP client for HTTP-based sources
+    if (!shared_http_client_) {
+        shared_http_client_ = std::make_unique<CurlHttpClient>("research-mcp/9source", 30);
+        if (!shared_http_client_->initialize()) {
+            DBG_LOG("wiki") << "shared_http_client_ init failed, HTTP sources will be unavailable";
+            shared_http_client_.reset();
+        }
+    }
+
+    datasource_registry_ = std::make_unique<DataSourceRegistry>();
+
+    // Source 1: Kiwix (priority 1, offline)
+    if (!kiwix_url_.empty()) {
+        datasource_registry_->register_source(
+            std::make_unique<KiwixSource>(kiwix_url_, shared_http_client_.get()));
+        DBG_LOG("wiki") << "registered kiwix_local: " << kiwix_url_;
+    }
+
+    // Source 2: GitRaw (priority 2)
+    datasource_registry_->register_source(
+        std::make_unique<GitRawSource>(shared_http_client_.get()));
+
+    // Source 3: GithubWiki (priority 3)
+    datasource_registry_->register_source(
+        std::make_unique<GithubWikiSource>(shared_http_client_.get()));
+
+    // Source 4: WebCrawler (priority 4) — uses hn_session_ if available
+    WebViewSession* crawl_session = hn_session_ ? hn_session_.get() : nullptr;
+    datasource_registry_->register_source(
+        std::make_unique<WebCrawlerSource>(crawl_session));
+
+    // Source 5: GithubApi (priority 5)
+    datasource_registry_->register_source(
+        std::make_unique<GithubApiSource>(&client_));
+
+    // Source 6: Arxiv (priority 6) — uses arxiv_session_ if available
+    WebViewSession* arxiv_session = arxiv_session_ ? arxiv_session_.get() : nullptr;
+    datasource_registry_->register_source(
+        std::make_unique<ArxivSource>(arxiv_session));
+
+    // Source 7: WebSearch (priority 7) — uses hn_session_ if available
+    datasource_registry_->register_source(
+        std::make_unique<WebSearchSource>(crawl_session));
+
+    // Source 8: LocalFs (priority 8)
+    datasource_registry_->register_source(
+        std::make_unique<LocalFsSource>());
+
+    // Source 9: GitClone (priority 9)
+    datasource_registry_->register_source(
+        std::make_unique<GitCloneSource>());
+
+    // Create WikiExplorer
+    wiki_explorer_ = std::make_unique<WikiExplorer>(*datasource_registry_,
+                                                       CacheManager::instance());
+
+    DBG_LOG("wiki") << "datasource registry ready: " << datasource_registry_->size() << " sources";
+}
+
+json McpServer::dispatch_wiki_tool(const std::string& tool_name, const json& args) {
+    init_datasource_registry();
+
+    if (!wiki_explorer_) {
+        return McpError("ERROR: Wiki explorer not initialized.");
+    }
+
+    DBG_LOG("wiki") << "dispatch_wiki_tool: " << tool_name;
+    try {
+        if (tool_name == "wiki_discover") {
+            auto res = wiki_explorer_->discover(args);
+            return McpSuccess(res);
+        }
+        if (tool_name == "wiki_read") {
+            auto res = wiki_explorer_->read(args);
+            return McpSuccess(res);
+        }
+        if (tool_name == "wiki_scan") {
+            auto res = wiki_explorer_->scan(args);
+            return McpSuccess(res);
+        }
+    } catch (const std::exception& e) {
+        return McpError(std::string("ERROR: wiki tool exception: ") + e.what());
+    }
+    return McpError("ERROR: unknown wiki tool: " + tool_name);
+}
+
 // ============ Package Registry 工具分发(5 个 pkg_* 工具: 4 原始 + 1 分层) ============
 json McpServer::dispatch_pkg_tool(const std::string& tool_name, const json& args) {
     if (!ensure_pkg_session()) return McpError("ERROR: Package session not initialized. Start with --pkg-profile <DIR>.");
@@ -1788,6 +1881,46 @@ json McpServer::handle_tools_list() {
                     })},
                     {"required", json::array({"question_id"})}
                 })}
+            },
+            // ============ wiki_* tools (9-source unified search) ============
+            {
+                {"name", "wiki_discover"},
+                {"description", "Probe documentation resources: local Kiwix first, then repo docs/Wiki/external sites. Returns lightweight resource list with is_local flag."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"repo", json::object({{"type","string"},{"description","Repository identifier owner/repo"}})},
+                        {"query", json::object({{"type","string"},{"description","Keywords or article title, prioritizes local Kiwix"}})},
+                        {"repo_branch", json::object({{"type","string"},{"default","main"}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "wiki_read"},
+                {"description", "Read a single document precisely. Auto-uses global cache, local Kiwix first, falls back to online if missing."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"target_uri", json::object({{"type","string"},{"description","canonical_uri from discover or scan"}})},
+                        {"force_refresh", json::object({{"type","boolean"},{"default",false}})}
+                    })},
+                    {"required", json::array({"target_uri"})}
+                })}
+            },
+            {
+                {"name", "wiki_scan"},
+                {"description", "Expand from a root resource + sub_path, batch-read related pages. Returns page summaries with content_preview only (first 500 chars)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"root_canonical_uri", json::object({{"type","string"},{"description","Root resource URI to expand from"}})},
+                        {"sub_path", json::object({{"type","string"},{"description","Sub-path or related keyword for expansion"}})},
+                        {"max_depth", json::object({{"type","integer"},{"minimum",1},{"maximum",5},{"default",2}})},
+                        {"max_pages", json::object({{"type","integer"},{"minimum",1},{"maximum",40},{"default",15}})},
+                        {"force_refresh", json::object({{"type","boolean"},{"default",false}})}
+                    })},
+                    {"required", json::array({"root_canonical_uri","sub_path"})}
+                })}
             }
         })}
     };
@@ -1815,6 +1948,7 @@ json McpServer::handle_tools_call(const json& params) {
     if (name.rfind("s2_", 0) == 0)     return dispatch_s2_tool(name, args);
     if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
     if (name.rfind("research_", 0) == 0) return dispatch_research_tool(name, args);
+    if (name.rfind("wiki_", 0) == 0)     return dispatch_wiki_tool(name, args);
 
     // GitHub 工具走原路径
     return dispatch_tool_call(client_, params);

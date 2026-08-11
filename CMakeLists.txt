@@ -92,6 +92,18 @@ add_executable(research-mcp
     src/formatters.cpp
     src/string_utils.cpp
     src/research_deep_dive.cpp
+    # 9-source unified search architecture
+    src/datasource_registry.cpp
+    src/kiwix_source.cpp
+    src/git_raw_source.cpp
+    src/github_wiki_source.cpp
+    src/web_crawler_source.cpp
+    src/github_api_source.cpp
+    src/arxiv_source.cpp
+    src/web_search_source.cpp
+    src/local_fs_source.cpp
+    src/git_clone_source.cpp
+    src/wiki_explorer.cpp
     third_party/sqlite/sqlite3.c
 )
 
