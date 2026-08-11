@@ -50,13 +50,13 @@ jobs:
     steps:
       # 1. Runner 安全硬化
       - name: Harden Runner
-        uses: step-security/harden-runner@0d381219ddf674d6ac78901a5f83db16a96d5fd
+        uses: step-security/harden-runner@v2
         with:
           egress-policy: audit
 
       # 2. 拉取代码
       - name: Checkout source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -76,7 +76,7 @@ jobs:
       # Key 构成: 系统标识 + 代码 commit + gn 参数哈希
       - name: Restore build cache
         if: env.ENABLE_FULL_CLEAN == 'false'
-        uses: actions/cache@269d9d88925b4b6f86742e2440414347962f2a94
+        uses: actions/cache@v4
         with:
           path: |
             ${{ env.GN_OUT_DIR }}
@@ -130,7 +130,7 @@ jobs:
 
       # 11. 上传制品 + 哈希清单
       - name: Upload build artifacts
-        uses: actions/upload-artifact@6546e369fd3c6df94d24d0922db7261b5ecd4527
+        uses: actions/upload-artifact@v4
         with:
           name: gn-deploy-artifact-${{ env.GIT_HEAD }}
           path: |
