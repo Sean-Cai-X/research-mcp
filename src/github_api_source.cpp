@@ -18,14 +18,18 @@ std::vector<SearchResult> GithubApiSource::search(const SearchQuery& query) {
     if (!client_) return results;
 
     // Repo-scoped search: query.repo is "owner/repo"
-    // List .md files in the repo tree
+    // LLM clients may pass "owner/repo/extra", so we extract only the
+    // first two segments and ignore trailing path parts.
     if (!query.repo.empty()) {
         std::string owner;
         std::string repo;
-        auto slash = query.repo.find('/');
-        if (slash == std::string::npos) return results;
-        owner = query.repo.substr(0, slash);
-        repo  = query.repo.substr(slash + 1);
+        auto slash1 = query.repo.find('/');
+        if (slash1 == std::string::npos || slash1 == 0) return results;
+        owner = query.repo.substr(0, slash1);
+        auto slash2 = query.repo.find('/', slash1 + 1);
+        repo  = (slash2 == std::string::npos)
+            ? query.repo.substr(slash1 + 1)
+            : query.repo.substr(slash1 + 1, slash2 - slash1 - 1);
         if (owner.empty() || repo.empty()) return results;
 
         json tree_json;

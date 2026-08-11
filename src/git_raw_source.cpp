@@ -61,13 +61,16 @@ std::vector<SearchResult> GitRawSource::search(const SearchQuery& query) {
     if (!http_client_->is_ready()) return results;
     if (query.repo.empty()) return results;
 
-    // Parse "owner/repo"
-    const size_t slash = query.repo.find('/');
-    if (slash == std::string::npos || slash == 0 || slash + 1 >= query.repo.size()) {
-        return results;
-    }
-    const std::string owner  = query.repo.substr(0, slash);
-    const std::string repo   = query.repo.substr(slash + 1);
+    // Parse "owner/repo" — LLM clients may pass "owner/repo/extra", so we
+    // extract only the first two segments and ignore trailing path parts.
+    const size_t slash1 = query.repo.find('/');
+    if (slash1 == std::string::npos || slash1 == 0) return results;
+    const std::string owner  = query.repo.substr(0, slash1);
+    const size_t slash2 = query.repo.find('/', slash1 + 1);
+    const std::string repo   = (slash2 == std::string::npos)
+        ? query.repo.substr(slash1 + 1)
+        : query.repo.substr(slash1 + 1, slash2 - slash1 - 1);
+    if (owner.empty() || repo.empty()) return results;
     const std::string branch = query.repo_branch.empty()
         ? std::string("main")
         : query.repo_branch;

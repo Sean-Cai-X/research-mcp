@@ -81,10 +81,14 @@ std::vector<SearchResult> GithubWikiSource::search(const SearchQuery& query) {
     std::vector<SearchResult> results;
     if (!http_client_ || !http_client_->is_ready()) return results;
 
-    size_t slash = query.repo.find('/');
-    if (slash == std::string::npos) return results;
-    std::string owner = query.repo.substr(0, slash);
-    std::string repo = query.repo.substr(slash + 1);
+    // Parse "owner/repo" — LLM clients may pass "owner/repo/extra"
+    size_t slash1 = query.repo.find('/');
+    if (slash1 == std::string::npos || slash1 == 0) return results;
+    std::string owner = query.repo.substr(0, slash1);
+    size_t slash2 = query.repo.find('/', slash1 + 1);
+    std::string repo = (slash2 == std::string::npos)
+        ? query.repo.substr(slash1 + 1)
+        : query.repo.substr(slash1 + 1, slash2 - slash1 - 1);
     if (owner.empty() || repo.empty()) return results;
 
     std::string url = "https://github.com/" + owner + "/" + repo + "/wiki";

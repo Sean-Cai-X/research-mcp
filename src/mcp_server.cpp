@@ -577,6 +577,8 @@ void McpServer::init_datasource_registry() {
         datasource_registry_->register_source(
             std::make_unique<KiwixSource>(kiwix_url_, shared_http_client_.get()));
         DBG_LOG("wiki") << "registered kiwix_local: " << kiwix_url_;
+    } else {
+        DBG_LOG("wiki") << "skipped kiwix_local: no --kiwix-url / KIWIX_SERVER_URL configured";
     }
 
     // Source 2: GitRaw (priority 2)
