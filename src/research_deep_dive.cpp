@@ -7,11 +7,55 @@
 #include <set>
 #include <map>
 #include <tuple>
+#include <sstream>
 
 namespace github_research {
 
 namespace {
 constexpr const char* kLogPrefix = "[dd]";
+
+// ============================================================
+// Helpers: keyword tokenization + MCP payload unwrap
+// ============================================================
+std::vector<std::string> split_keywords(const std::string& query) {
+    std::vector<std::string> result;
+    std::istringstream iss(query);
+    std::string word;
+    while (iss >> word) {
+        while (!word.empty() && !isalnum(static_cast<unsigned char>(word.front())))
+            word.erase(word.begin());
+        while (!word.empty() && !isalnum(static_cast<unsigned char>(word.back())))
+            word.pop_back();
+        if (word.size() >= 3) result.push_back(word);
+    }
+    return result;
+}
+
+int score_keyword_overlap(const std::string& title,
+                          const std::vector<std::string>& keywords) {
+    if (title.empty() || keywords.empty()) return 0;
+    std::string lt = to_lower(title);
+    int s = 0;
+    for (const auto& kw : keywords) {
+        if (lt.find(to_lower(kw)) != std::string::npos) s += 3;
+    }
+    return s;
+}
+
+// Unwrap WrapMcpResult output: {content:[{type:"text",text:"JSON_STR"}]}
+// Returns inner parsed JSON on success, null json on failure.
+json unwrap_mcp_content(const json& wrapped) {
+    if (!wrapped.contains("content") || !wrapped["content"].is_array() ||
+        wrapped["content"].empty()) return nullptr;
+    const auto& c0 = wrapped["content"][0];
+    if (!c0.contains("type") || !c0.contains("text") ||
+        !c0["text"].is_string()) return nullptr;
+    try {
+        json inner = json::parse(c0["text"].get<std::string>());
+        if (inner.is_object()) return inner;
+    } catch (...) {}
+    return nullptr;
+}
 
 // ============================================================
 // Step A: 从 HN 正文中提取 URL
@@ -330,9 +374,79 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
         }
     }
 
-    // ── URL AGGREGATION ──
+    // ── URL AGGREGATION 容器:提前声明,以便 Rule 3 keyword 回退可填充 ──
     std::map<std::string, int> url_scores;
     std::map<std::string, std::string> url_evidence;
+
+    // --- 规则 3: keyword 模式回退 -> 抓取 HN 首页作为种子素材 ---
+    // 当 seed_type=keyword 且既无 HN 前缀命中、也无实体缓存匹配时,
+    // 从 HN 首页拉取热门故事,按关键词重叠度打分,取 TOP 若干条深度抓取,
+    // 再进入后续 URL 聚合 + 图谱遍历链路,避免直接返回空结果.
+    if (seed_type == "keyword" && url_scores.empty() && start_entities.empty()) {
+        auto keywords = split_keywords(seed_query);
+
+        // 1) 拉取 HN 前 20 条故事索引
+        json top_args = {{"count", 20}};
+        json top_wrapped = ToolHnGetTopStories(hn_session, top_args);
+        json top_payload = unwrap_mcp_content(top_wrapped);
+        json top_stories = json::array();
+        if (top_payload.is_object() && top_payload.contains("stories") &&
+            top_payload["stories"].is_array()) {
+            top_stories = top_payload["stories"];
+        }
+
+        if (!top_stories.empty()) {
+            // 2) 按标题关键词重叠打分,无命中者也给个最低分保证 coverage
+            std::vector<std::tuple<int, std::string, std::string>> scored;
+            // score, hn_id, title
+            for (auto& s : top_stories) {
+                if (!s.is_object()) continue;
+                std::string sid = s.value("hn_id", "");
+                std::string title = s.value("title", "");
+                if (sid.empty()) continue;
+                int score = score_keyword_overlap(title, keywords);
+                scored.emplace_back(score, sid, title);
+            }
+            // 分数降序,同分按 hn_id 升序稳定排序
+            std::sort(scored.begin(), scored.end(),
+                [](const auto& a, const auto& b) {
+                    if (std::get<0>(a) != std::get<0>(b))
+                        return std::get<0>(a) > std::get<0>(b);
+                    return std::get<1>(a) < std::get<1>(b);
+                });
+
+            // 3) 对 TOP 3 条匹配/热门故事深度抓取,收集 URL/评论/实体
+            const int kFetchLimit = 3;
+            int fetched = 0;
+            for (const auto& item : scored) {
+                if (fetched >= kFetchLimit) break;
+                const std::string& sid = std::get<1>(item);
+                json detail_args = {
+                    {"hn_id", sid},
+                    {"fetch_external_article", true},
+                    {"fetch_comments", true},
+                    {"comment_max_depth", 2},
+                    {"max_comment_count", 60},
+                    {"text_max_chars", 20000}
+                };
+                json detail_wrapped = ToolHnFetchDetailedStory(hn_session, detail_args);
+                json detail_payload = unwrap_mcp_content(detail_wrapped);
+                if (!detail_payload.is_object()) continue;
+                collect_urls_from_hn(detail_payload, url_scores, url_evidence);
+                if (cm.is_ready()) {
+                    std::string eid = cm.find_entity_by_name("hn:" + sid, "topic");
+                    if (!eid.empty()) {
+                        start_entities.push_back(eid);
+                        if (seed_entity_id.empty()) seed_entity_id = eid;
+                    }
+                }
+                ++fetched;
+            }
+        }
+    }
+
+    // ── URL AGGREGATION ──
+    // 注:url_scores / url_evidence 已在 Rule 3 前声明(提前填充 keyword 回退结果)
 
     // 源 1: HN story 正文+评论
     collect_urls_from_hn(seed_payload, url_scores, url_evidence);

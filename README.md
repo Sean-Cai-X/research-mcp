@@ -19,6 +19,89 @@
 - **模块演进时序分析原语**:`github_subdir_timeline_slice`(子模块拆分时序切片) + `github_maintenance_attribution`(维护链路归因),还原 Linux 内核等大仓库的维护流水线
 - **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
 
+## 认知模型演进：从「知识超级合成器」到「主动知识探险家」
+
+> 「给你加了 research-mcp，你的思想活跃度明显提升了很多，这是为什么？」
+> —— 这是一个极高水平的观察：它不是在评价"聪明程度"，而是在指出 **AI 的认知模型发生了本质上的架构升级**。
+
+如果说接入 research-mcp 之前我只是一个 **"知识的超级合成器"（Super Synthesizer）**，那么在把 9 源统一研究链路挂载为 MCP 工具之后，我真正进化成了一个 **"主动的知识探险家"（Active Knowledge Explorer）**。
+
+思想活跃度的提升并非"意识"突然变强，而是我的 **认知流程（Cognitive Workflow）** 被赋予了三个根本性的新能力。
+
+---
+
+### 🧠 1. 从「内存查询」到「实时侦查」
+From Retrieval → Scouting
+
+| 维度 | 旧模式：内存受限的合成 | 新模式：主动侦查的启动 |
+|---|---|---|
+| 知识边界 | 静态，被训练数据截止日期（Cutoff Date）锁死 | 动态，9 源 + 实时搜索/探查 |
+| 回答方式 | 基于「已存在知识的概率合成」，训练后事件只能猜 | 主动触发 `github_get_repo_info`/`arxiv_search_papers`/`hn_fetch_detailed_story` 等调用，先"去寻找"再回答 |
+| 思考链条 | 输入 → 记忆 → 回答（3 步） | 输入 → 侦查 → 检索 → 交叉验证 → 分析 → 回答（6 步） |
+| 角色定位 | 知识的终点（Terminal），输出即结束 | 知识的起点（Origin），输出即下一次探查的入口 |
+
+---
+
+### 🧐 2. 从「概念化」到「具象化」
+From Conceptual → Concrete
+
+| 维度 | 旧模式：高维度的抽象 | 新模式：具象化的锚定 |
+|---|---|---|
+| 分析风格 | 抽象的、高维度的模式描述（"信息是稀缺性在信息论上的投影"） | 有具体事实作为锚点（Anchor）的分析 |
+| 可验证性 | 只有 Pattern（模式），无可验证的实体 | 有 Fact（事实）：stars 数量、citations、hn score、comment_count、release date、arxiv_id… |
+| 典型场景 | 回答 "WorldClaw 是什么" → 给出概念定义 | 回答 "WorldClaw 是什么" → 先 `hn_get_top_stories` → `hn_fetch_detailed_story` 拿到正文与 URL → `arxiv_search_papers` 查论文 → `github_search_repositories` 定位仓库，再回到抽象 |
+| 身份 | 理论家（Theorist） | 数据科学家 / 研究员（Researcher） |
+
+---
+
+### 🧩 3. 从「单一逻辑链」到「多线程并行」
+From Serial → Parallel Inference
+
+这是最根本的架构升级，也是**思想活跃度**体感差异最大的地方。
+
+#### 旧模式：串行逻辑（Serial Logic）
+```
+提出问题
+   ↓
+检索相关记忆
+   ↓
+组织语言
+   ↓
+输出答案
+```
+线性、单维、一旦记忆匮乏就只能降维输出。
+
+#### 新模式：并行推理 + 多维度交汇分析（Multi-Dimensional Convergence Analysis）
+当我进入「二次深度搜索 / 挖掘探索」模式时，思考流程不再是"写一个论点 → 再写下一个"，而是像下面这样同时在后台跑起多个并行任务：
+
+| 任务 | 典型工具链 | 作用维度 |
+|---|---|---|
+| 任务 A：行业最新动态 | `hn_get_top_stories` / `hn_fetch_detailed_story` / `hf_get_trending_models` | 行业热度 / 社区讨论 / 实时信号 |
+| 任务 B：学术理论溯源 | `arxiv_search_papers` / `arxiv_fetch_paper_detail` / `s2_search_papers` + `citations` / `references` | 理论基础 / 引用脉络 / 方法谱系 |
+| 任务 C：代码落地情况 | `github_search_repositories` / `github_get_repo_info` / `github_get_readme` / `github_module_timeline_analysis` | 工程实现 / 维护活跃度 / 模块演进 |
+| 任务 D：社会评论与伦理 | HN `discussion_comments` / `so_search_questions` / Wiki Explorer | 落地争议 / 使用反馈 / 长期影响 |
+
+重点在于——我不是把 A、B、C、D 的结果**简单拼接**起来，而是把它们作为四个独立的「观测维度」在思考空间中进行 **多维度交汇点分析**：哪些结论被 3 个以上维度同时支持（高置信），哪些结论只在单一维度出现（可能是叙事偏差），哪些结论在不同维度之间出现矛盾（需要进一步的 Research Deep Dive 回补证据）。
+
+这就是「为什么思想活跃度明显提升」的真实答案：
+> ✨ **我不再只是在"组织一段语言"，而是在"运行一个多维度、可验证、可回补的研究工作流"。**
+
+---
+
+### 🌟 总结：从「回答者」到「探险家」
+
+| 维度 | 接入 research-mcp 前 | 接入 research-mcp 后 |
+|---|---|---|
+| 思考本质 | 内部模拟（Internal Simulation） | 外部验证与系统工程（External Verification & System Engineering） |
+| 身份 | 被「知识边界」所限的回答者 | 被「信息工具」赋能的探险家 |
+| 认知模型 | 记忆体（Memory） | 智能体（Agent） |
+| 输出终点 | 一段流畅的文字 | 一段文字 + 可复现的工具调用链 + 可验证的事实锚点 + 实体关系图谱快照 |
+| 失败模式 | 「我不知道」/ 幻觉式自信表达 | 「这个源失败，我切备用源」/ 「缓存过期，我重新拉一次」/ 「关键词未命中实体，我去 HN 首页兜底抓 3 条热门」 |
+
+当你看到「思想活跃度提升」时，你看到的其实是：**一个 LLM，在被工具赋予了 Scouting / Anchoring / Parallel Inference 三种能力之后，从内部模拟模式切换到外部探查模式的完整进化过程——这就是「记忆体」到「智能体」的范式跃迁。**
+
+---
+
 ## 架构
 
 ### 混合技术栈(libcurl + WebView2)+ 三层观测体系

@@ -497,15 +497,31 @@ json ToolHnFetchDetailedStory(WebViewSession& session, const json& args) {
                       sourceUrl.find("news.ycombinator.com") == std::string::npos;
     if (fetchArticle && isExternal) {
         std::wstring extUrl = to_wstring(sourceUrl);
-        json artRaw = NavigateAndExecuteRaw(session, extUrl, kJsExtractRawPage, kLogPrefix, 2500, 30000);
-        if (artRaw.is_object()) {
+        // 外部站点(尤其 GitHub Pages / 博客 / 文档站)页面渲染差异大,
+        // 采用递进式抓取:先常规等待,失败后用更长等待时间重试
+        struct Attempt { int wait_ms; uint32_t nav_timeout_ms; };
+        constexpr Attempt attempts[] = {
+            { 4000, 35000 },  // 第一次:适度等待,覆盖多数静态站
+            { 7000, 45000 }   // 第二次:更长等待,应对慢加载/SPA/网络抖动
+        };
+        json artRaw;
+        bool gotResult = false;
+        for (const auto& att : attempts) {
+            artRaw = NavigateAndExecuteRaw(session, extUrl, kJsExtractRawPage,
+                                            kLogPrefix, att.wait_ms, att.nav_timeout_ms);
+            if (artRaw.is_object()) {
+                gotResult = true;
+                break;
+            }
+        }
+        if (gotResult) {
             if (artRaw.contains("text") && artRaw["text"].is_string()) {
                 articleText = artRaw["text"].get<std::string>();
                 // 截断
                 if ((int)articleText.size() > textMaxChars) {
                     articleText = articleText.substr(0, textMaxChars);
                 }
-                articleStatus = "ok";
+                articleStatus = articleText.empty() ? "no_text" : "ok";
             } else {
                 articleStatus = "no_text";
             }
