@@ -164,7 +164,7 @@ json NavigateAndExecuteRaw(WebViewSession& session,
         }
         std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms parse OK, returning" << std::endl;
         return parsed;
-    } catch (const std::exception& e) {
+    } catch (const std::exception& /*e*/) {
         // 第一次解析失败(常见原因:页面 JS 提取的 text 中包含语义非法 UTF-8:
         // 如 surrogate 范围 ED A0 80..ED BF BF、超长编码等,简单字节级 cleaning
         // 无法挡住这些情况,nlohmann json 会严格校验并抛异常。

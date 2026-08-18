@@ -53,24 +53,24 @@ std::string UrlEncodeComponent(const std::string& str);
 // ============== 统一原始文本提取 JS ==============
 // 设计理念:工具只负责"取到页面内容",解析交给 AI
 // 所有数据源搜索/详情类工具统一调用此 JS,返回原始页面文本
-// 返回: {success:bool, url:string, title:string, text:string, html:string}
+// 返回: {success:bool, url:string, title:string, text:string}
 //   - text: document.body.innerText(去标签的纯文本,AI 可直接读)
-//   - html: document.documentElement.outerHTML(备用,完整 DOM)
 //   - text 截断到 50000 字符避免超大返回
+// 注: 2026-08-18 起移除 html 字段:
+//   1) 其典型大小 50KB(约为 text 的 10~20 倍),通过 Streamable HTTP + 代理转发时
+//      极易触发代理网关"Could not establish connection / payload too large / read timeout"
+//      等与网络链路相关的偶发错误(HF 5 并发场景尤其明显)
+//   2) 实际代码路径中没有任何一处消费 html 字段(全部工具都只用 text/title/url)
 constexpr const char* kJsExtractRawPage = R"(
 (function(){
     var text = "";
     try { text = document.body ? document.body.innerText : ""; } catch(e) { text = ""; }
     if(text && text.length > 50000) text = text.substring(0, 50000);
-    var html = "";
-    try { html = document.documentElement.outerHTML; } catch(e) { html = ""; }
-    if(html && html.length > 50000) html = html.substring(0, 50000);
     return JSON.stringify({
         success: true,
         url: window.location.href,
         title: document.title || "",
-        text: text,
-        html: html
+        text: text
     });
 })();
 )";
