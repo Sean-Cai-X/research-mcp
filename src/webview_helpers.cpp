@@ -44,51 +44,14 @@ json NavigateAndExecute(WebViewSession& session,
                         const char* logPrefix,
                         int waitMs,
                         uint32_t navTimeoutMs) {
-    if (!session.IsReady()) {
+    // 委托给 NavigateAndExecuteRaw(已含完整 UTF-8 清洗 + 双编码 inner 解析),
+    // 避免重复维护两份解析逻辑。失败时 raw 返回 nullptr。
+    json raw = NavigateAndExecuteRaw(session, url, js, logPrefix, waitMs, navTimeoutMs);
+    if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + logPrefix +
-                        " WebView session not initialized.");
+                        " fetch failed (navigation/JS/parse error, see stderr for details)");
     }
-
-    // 1. 导航
-    HRESULT hr = session.Navigate(url);
-    if (FAILED(hr)) {
-        std::cerr << logPrefix << " Navigate failed: 0x" << std::hex << hr << std::endl;
-        return McpError(std::string("ERROR: ") + logPrefix + " navigation failed");
-    }
-
-    // 2. 等待 NavigationCompleted
-    HRESULT navRes = session.WaitForNavigation(navTimeoutMs);
-    if (FAILED(navRes)) {
-        std::cerr << logPrefix << " Nav timeout, still attempt read" << std::endl;
-    } else {
-        // 额外等待 DOM 渲染稳定
-        if (waitMs > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
-        }
-    }
-
-    // 3. 执行 JS
-    ScriptResult sr = session.ExecuteScript(js);
-    if (!sr.success) {
-        std::cerr << logPrefix << " JS exec failed: " << sr.error << std::endl;
-        return McpError(std::string("ERROR: ") + logPrefix + " JS exec failed: " + sr.error);
-    }
-
-    // 4. 解析 JSON
-    try {
-        json parsed = json::parse(sr.data);
-        // WebView2 ExecuteScript 返回值可能是 JSON 转义字符串,再解析一次
-        if (parsed.is_string()) {
-            parsed = json::parse(parsed.get<std::string>());
-        }
-        return WrapMcpResult(parsed);
-    } catch (const std::exception& e) {
-        std::string raw = sr.data.substr(0, 300);
-        std::cerr << logPrefix << " JSON parse failed: " << e.what()
-                  << " raw=" << raw << std::endl;
-        return McpError(std::string("ERROR: ") + logPrefix +
-                        " result parse failed: " + e.what() + " raw=" + raw);
-    }
+    return WrapMcpResult(raw);
 }
 
 // 与 NavigateAndExecute 相同流程,但返回原始 JSON payload(不包装 MCP content)
