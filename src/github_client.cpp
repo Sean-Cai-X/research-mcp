@@ -180,7 +180,23 @@ json GitHubClient::http_get(const std::string& endpoint,
     if (status_code >= 400) {
         std::string body_preview = body.substr(0, std::min<size_t>(body.size(), 500));
         std::string msg = "HTTP " + std::to_string(status_code);
-        if (status_code == 404) msg = "repository not found";
+        // 尝试从 GitHub 响应体解析真实错误信息
+        // GitHub 404 可能是: 仓库不存在 / 资源(分支/tree/commit)不存在 / 私有仓库无权限
+        // 之前统一写 "repository not found" 会掩盖分支名错误等真实原因
+        if (status_code == 404) {
+            msg = "not found";
+            try {
+                json err_body = json::parse(body);
+                std::string gh_msg = err_body.value("message", "");
+                if (!gh_msg.empty()) msg = gh_msg;  // "Branch not found" / "Not Found" 等
+            } catch (...) {
+                // body 不是 JSON,保持 "not found"
+            }
+        } else if (status_code == 401) {
+            msg = "authentication required (no valid token)";
+        } else if (status_code == 403) {
+            msg = "forbidden (rate limit or access denied)";
+        }
         GitHubAPIError err(msg, status_code, url, body_preview);
         if (cm.is_ready()) cm.put("github", cache_key, body, "json", 2, "", "failed", err.what());
         throw err;
@@ -302,9 +318,63 @@ json GitHubClient::get_tree_raw(const std::string& owner, const std::string& rep
     std::map<std::string, std::string> params;
     if (recursive) params["recursive"] = "1";
 
+    // 判断 branch 是否看起来像 40 字符 hex SHA
+    auto is_hex_sha = [](const std::string& s) -> bool {
+        if (s.size() != 40) return false;
+        for (char c : s) {
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return false;
+        }
+        return true;
+    };
+
+    std::string tree_ref = branch;
+
+    // 非 SHA 输入(即分支名)需要先解析为 commit SHA
+    if (!is_hex_sha(branch)) {
+        // 尝试 1: 直接用分支名查 branches API
+        try {
+            json branch_info = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
+                                        "/branches/" + url_encode(branch));
+            if (branch_info.is_object() && branch_info.contains("commit")) {
+                tree_ref = branch_info["commit"].value("sha", branch);
+            }
+        } catch (const GitHubAPIError&) {
+            // 尝试 2: 模糊后缀匹配分支列表
+            // 典型场景:用户传 "cxcore-integration",实际分支名是 "codex/cxcore-integration"
+            try {
+                json branches = http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
+                                         "/branches", {{"per_page", "100"}});
+                if (branches.is_array()) {
+                    for (const auto& b : branches) {
+                        std::string bname = b.value("name", "");
+                        // 精确匹配优先
+                        if (bname == branch && b.contains("commit")) {
+                            tree_ref = b["commit"].value("sha", branch);
+                            break;
+                        }
+                    }
+                    // 精确匹配失败,尝试后缀匹配
+                    if (tree_ref == branch) {
+                        for (const auto& b : branches) {
+                            std::string bname = b.value("name", "");
+                            if (bname.size() >= branch.size() &&
+                                bname.compare(bname.size() - branch.size(), branch.size(), branch) == 0 &&
+                                b.contains("commit")) {
+                                tree_ref = b["commit"].value("sha", branch);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (const GitHubAPIError&) {
+                // 分支列表也拉不到,保持 tree_ref = branch 原样传入(让 trees 端点给 404)
+            }
+        }
+    }
+
     try {
         return http_get("/repos/" + url_encode(owner) + "/" + url_encode(repo) +
-                        "/git/trees/" + url_encode(branch), params);
+                        "/git/trees/" + url_encode(tree_ref), params);
     } catch (const GitHubAPIError&) {
         // main 失败时回退 master(仅当 branch == "main")
         if (branch == "main") {

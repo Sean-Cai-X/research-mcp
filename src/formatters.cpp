@@ -10,7 +10,17 @@ std::string format_tree(const json& tree_data, int max_depth) {
         return "[Unable to parse tree]";
     }
 
+    // 输出粒度由 max_depth 控制;此处仅设保护性字符上限,
+    // 防止极端大仓库(如 recursive 全树)输出过大撑爆 MCP 传输与 LLM 上下文。
+    // 不能再用"100 行"硬上限——它会破坏 max_depth 语义,导致 depth=3 的请求
+    // 在前 100 行就被截断,后续模块(如 cxgeom/cximage)静默丢失。
+    constexpr size_t kMaxOutputChars = 50000;
+
     std::vector<std::string> lines;
+    size_t total_chars = 0;
+    bool size_truncated = false;
+    size_t shown = 0;
+
     for (const auto& item : tree_data["tree"]) {
         if (!item.contains("path") || !item["path"].is_string()) continue;
         std::string path = item["path"].get<std::string>();
@@ -26,23 +36,31 @@ std::string format_tree(const json& tree_data, int max_depth) {
             std::string name = (last_slash == std::string::npos) ? path : path.substr(last_slash + 1);
 
             std::string type = item.value("type", std::string());
-            if (type == "tree") {
-                lines.push_back(indent + name + "/");
-            } else {
-                lines.push_back(indent + name);
+            std::string line = (type == "tree") ? (indent + name + "/") : (indent + name);
+
+            // 字符上限保护(含换行符)
+            if (total_chars + line.size() + 1 > kMaxOutputChars) {
+                size_truncated = true;
+                break;
             }
+            total_chars += line.size() + 1;
+            lines.push_back(std::move(line));
+            ++shown;
         }
     }
 
-    // 限制输出 100 行(对齐 Python 版 lines[:100])
-    if (lines.size() > 100) {
-        lines.resize(100);
-    }
+    // GitHub API 自身可能因树过大返回 truncated:true
+    bool api_truncated = tree_data.value("truncated", false);
 
     std::string result;
     for (size_t i = 0; i < lines.size(); ++i) {
         if (i > 0) result += "\n";
         result += lines[i];
+    }
+    if (size_truncated || api_truncated) {
+        result += "\n... (truncated: " + std::to_string(shown) + " entries shown";
+        if (api_truncated) result += "; GitHub API tree also truncated";
+        result += ")";
     }
     return result;
 }
