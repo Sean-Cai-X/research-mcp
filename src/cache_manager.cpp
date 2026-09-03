@@ -2397,7 +2397,7 @@ std::string CacheManager::create_focus(
     json ex_json = exclude_words;
     json rel_json = {"cites","author_of","depends_on","extends","competes_with","used_by","derived_from","evaluated_on"};
 
-    std::string sql = "INSERT INTO focuses (id, name, description, seed_entities, keywords, exclude_words, allowed_rels, max_depth, relevance_threshold, max_nodes, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
+    std::string sql = "INSERT INTO focuses (id, name, description, seed_entities, keywords, exclude_words, allowed_rels, allowed_sources, max_depth, relevance_threshold, max_nodes, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return "";
     auto bind_text = [&](int i, const std::string& s) {
@@ -2410,11 +2410,12 @@ std::string CacheManager::create_focus(
     bind_text(5, kw_json.dump());
     bind_text(6, ex_json.dump());
     bind_text(7, rel_json.dump());
-    sqlite3_bind_int(stmt, 8, max_depth);
-    sqlite3_bind_double(stmt, 9, relevance_threshold);
-    sqlite3_bind_int(stmt, 10, max_nodes);
-    bind_text(11, "active");
-    sqlite3_bind_int64(stmt, 12, now);
+    sqlite3_bind_null(stmt, 8);          // allowed_sources 暂空
+    sqlite3_bind_int(stmt, 9, max_depth);
+    sqlite3_bind_double(stmt, 10, relevance_threshold);
+    sqlite3_bind_int(stmt, 11, max_nodes);
+    bind_text(12, "active");
+    sqlite3_bind_int64(stmt, 13, now);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
@@ -2438,7 +2439,9 @@ std::string CacheManager::create_focus(
 json CacheManager::get_focus(const std::string& focus_id) {
     std::lock_guard<std::mutex> lk(mu_);
     json result;
-    std::string sql = "SELECT * FROM focuses WHERE id=?";
+    std::string sql = "SELECT id, name, description, seed_entities, keywords, exclude_words, "
+                      "allowed_rels, allowed_sources, max_depth, relevance_threshold, max_nodes, "
+                      "status, created_at, last_crawl_at FROM focuses WHERE id=?";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -2451,12 +2454,18 @@ json CacheManager::get_focus(const std::string& focus_id) {
             result["keywords"] = json::parse((const char*)sqlite3_column_text(stmt, 4));
             result["exclude_words"] = json::parse((const char*)sqlite3_column_text(stmt, 5));
             result["allowed_rels"] = json::parse((const char*)sqlite3_column_text(stmt, 6));
-            result["max_depth"] = sqlite3_column_int(stmt, 7);
-            result["relevance_threshold"] = sqlite3_column_double(stmt, 8);
-            result["max_nodes"] = sqlite3_column_int(stmt, 9);
-            result["status"] = (const char*)sqlite3_column_text(stmt, 10);
-            result["created_at"] = sqlite3_column_int64(stmt, 11);
-            result["last_crawl_at"] = sqlite3_column_int64(stmt, 12);
+            if (sqlite3_column_type(stmt, 7) != SQLITE_NULL) {
+                result["allowed_sources"] = json::parse((const char*)sqlite3_column_text(stmt, 7));
+            } else {
+                result["allowed_sources"] = json::array();
+            }
+            result["max_depth"] = sqlite3_column_int(stmt, 8);
+            result["relevance_threshold"] = sqlite3_column_double(stmt, 9);
+            result["max_nodes"] = sqlite3_column_int(stmt, 10);
+            const char* status = (const char*)sqlite3_column_text(stmt, 11);
+            result["status"] = status ? status : "active";
+            result["created_at"] = sqlite3_column_int64(stmt, 12);
+            result["last_crawl_at"] = sqlite3_column_int64(stmt, 13);
         }
         sqlite3_finalize(stmt);
     }

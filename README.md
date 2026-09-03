@@ -1,17 +1,17 @@
-# github-research-mcp (DeerFlow++)
+﻿# github-research-mcp (DeerFlow++)
 
 9 源统一研究 MCP 服务,基于 **混合技术栈(libcurl + WebView2)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
 
 ## 特性
 
-- **9 源 81 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
+- **9 源 71 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
 - **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走 **WebView2**(完整 Chromium 指纹、JS 渲染、DOM 提取)
 - **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
 - **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
 - **多实例会话隔离**:每个网页源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
 - **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
-- **统一 SQLite 缓存层(WAL + 14 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + **定向知识雷达 6 张表**(focuses / focus_members / attributes / gaps / extraction_jobs / track_schedules)
+- **统一 SQLite 缓存层(WAL + 20 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + **定向知识雷达 6 张表**(focuses / focus_members / attributes / gaps / extraction_jobs / track_schedules)
 - **多源融合 + 字段级策略**:UNION / LATEST,自动按 source reliability 排序
 - **熔断器 + 降级链**:主源失败自动切换备用源,所有源失败返回陈旧缓存(stale)
 - **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、记录时间快照
@@ -122,7 +122,7 @@ From Serial → Parallel Inference
 │  + github_maintenance_attribution  (原语B:维护链路归因)          │
 │  + github_fetch_repo_detail / github_fetch_relation_network     │
 │  + github_search_index / github_ingest_*                        │
-│  + focus_* (9) / entity_* (1)     (定向知识雷达)                 │
+│  + focus_* (19) / entity_* (1) / web_search    (定向知识雷达)  │
 └────────────────┬───────────────────────────────────────────────────────┘
                  │
    ┌─────────────┼─────────────┬─────────────┬─────────────┐
@@ -206,7 +206,7 @@ From Serial → Parallel Inference
 | Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` | — | — |
 | Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` | — | — |
 
-## 统一 SQLite 缓存层(WAL + 14 张表)
+## 统一 SQLite 缓存层(WAL + 20 张表)
 
 ### 表结构
 
@@ -866,7 +866,7 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 $body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 $r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
 "tools count: $($r.result.tools.Count)"
-# → tools count: 81
+# → tools count: 90
 ```
 
 ### arXiv 论文详情(支持 cache_hit)
@@ -980,7 +980,7 @@ $r.result.content[0].text
 
 失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
 
-## 工具列表(81 个)
+## 工具列表(90 个)
 
 ### GitHub(18 个)
 
@@ -1101,7 +1101,7 @@ $r.result.content[0].text
 | `wiki_read` | 读取指定维基条目的完整正文(从 Kiwix 本地 ZIM 解析,零网络延迟,支持 TOC / section 提取) |
 | `wiki_scan` | 批量扫描维基分类 / 索引页,枚举属于某主题的所有条目列表(分页遍历) |
 
-### 定向知识雷达 Focus (10 个)
+### 定向知识雷达 Focus (19 个 + 1 个 web_search)
 
 围绕 **Focus(关注域)** 这个核心抽象,实现"给个方向 → 自动蔓延 → 持续跟踪"。
 
@@ -1120,7 +1120,7 @@ $r.result.content[0].text
 |---|---|
 | `focus_members` | 查询关注域成员实体列表,可按 `sprawl_status` 过滤(seed/active/boundary/pruned/exhausted),默认 limit=100 |
 | `focus_gaps` | 查询缺口待办列表,按 priority 降序返回未解决的属性缺口(用于定向调度下一轮抓取) |
-| `focus_stats` | 返回蔓延统计看板:entities 总数 / attributes 总数 / relations 总数 / 平均 completeness / 各 sprawl_status 计数 |
+| `focus_stats` | 返回蔓延统计看板:entities 总数 / attributes 总数 / relations 总数 / 各 sprawl_status 计数 |
 
 #### 实体属性查询 (1 个)
 
@@ -1134,6 +1134,32 @@ $r.result.content[0].text
 |---|---|
 | `focus_prune` | 人工剪枝。把某个 `active`/`boundary` 节点降为 `pruned`(用户觉得跑题了),后续不再扩展 |
 | `focus_promote` | 人工提升。把某个 `boundary` 节点升为 `active`(用户觉得相关),允许它向外扩展邻居 |
+
+#### 蔓延引擎 (5 个)
+
+| 工具 | 说明 |
+|---|---|
+| `focus_sprawl_tick` | 执行一轮蔓延 tick:从 active/seed 节点选 TOP-N,发现邻居、算相关性、分类入队、更新状态。支持 `dry_run=true` 只读模式 |
+| `focus_estimate_relevance` | 调试工具:对候选实体手动算相关性分数(关键词重叠 + 关系类型 + 源可信度 + 深度衰减),返回 classify 结果 |
+| `focus_extract_tick` | 批量属性提取 tick:对本轮新发现 + active 节点做窄操作属性提取(一次 1-2 个 attr_key) |
+| `focus_gaps_detect` | 扫描 focus 下所有实体的缺失属性,按 priority 排序生成缺口待办清单 |
+| `focus_track_tick` | 自适应跟踪 tick:对 exhausted 节点按 track_schedules 检查是否到更新时间,执行增量查询 |
+
+#### 体验层 (3 个)
+
+| 工具 | 说明 |
+|---|---|
+| `focus_updates_since` | 类 RSS 增量查询:返回 focus 自指定时间戳以来的新属性、新关系、新成员 |
+| `focus_cross_gain` | 多 focus 交叉增益:查找同时被多个 focus 引用的实体,建议提升优先级 |
+| `focus_export` | 导出 focus 全部数据为结构化 JSON(focus 定义 + members + 统计) |
+
+#### 独立路由的搜索引擎 (1 个)
+
+| 工具 | 说明 |
+|---|---|
+| `web_search` | 综合 Web 搜索引擎(Bing 主 + Tavily 备用 + SQLite 缓存),支持 freshness / mkt / max_results |
+
+> **Phase-1 骨架说明**:以上 19 个 Focus 工具 + `web_search` 路由全部通过 HTTP MCP 验证(2026-09-03 端到端测试)。参数解析(`relevance_threshold`/`max_depth`/`max_nodes` 写入读取一致)、状态机种子注册、相关性引擎都已落地。蔓延的"手"(真实 discover_neighbors 调 GitHub/arXiv/WebSearch API 拉邻居)和"窄操作提取"(真实去补属性缺口)将在 Phase-2 接入。
 
 ## 客户端配置
 
@@ -1174,7 +1200,7 @@ llama-server.exe ^
   --mcp http://127.0.0.1:8765/mcp
 ```
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 81 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 90 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
 
 ## 协议兼容性
 
@@ -1186,7 +1212,7 @@ llama-server.exe ^
 | 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
 | CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
 | OPTIONS 预检 | ✅ | 自动返回 200 |
-| `tools/list` | ✅ | 81 个工具(9 源 + Focus) |
+| `tools/list` | ✅ | 90 个工具(9 源 + Focus) |
 | `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
 | `ping` | ✅ | 心跳保活 |
 | `shutdown` | ✅ | 触发 server 优雅停止 |
@@ -1304,7 +1330,7 @@ cmake --build build --config Release --target test_smoke
 
 | 验证项 | 期望结果 |
 |---|---|
-| `tools/list` 返回工具数 | 81 |
+| `tools/list` 返回工具数 | 90 |
 | `arxiv_fetch_paper_detail` 首次调用 | 返回论文详情(无 `cache_hit` 字段) |
 | `arxiv_fetch_paper_detail` 二次调用 | `cache_hit=true` + `cache_expires_at` 时间戳 |
 | `hn_fetch_detailed_story` 返回 `source_url=arxiv.org` | 自动建立 `story -[mentions]-> paper` 跨源关系 |
@@ -1320,7 +1346,7 @@ cmake --build build --config Release --target test_smoke
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
 | 数据源 | GitHub 单源 | 9 源统一接入 |
-| 缓存层 | 无 | SQLite WAL + 14 张表 + 188 项烟雾测试 |
+| 缓存层 | 无 | SQLite WAL + 20 张表 + 188 项烟雾测试 |
 | 多源融合 | 无 | 字段级 UNION/LATEST 策略 + 熔断器 + 降级链 |
 | 关系图谱 | 无 | Entity Mapper + 跨源 mentions 自动建立 |
 | 三层观测 | 无 | L1 概览 / L2 单点深挖 / L3 关联图谱 |
@@ -1598,8 +1624,8 @@ llama-server.exe ^
 | 验证项 | 结果 | 说明 |
 |---|---|---|
 | GET `/` | ✅ | 返回 9 源状态(GitHub=true,其余需 --xxx-profile) |
-| GET `/tools` | ✅ | 返回 81 个工具(完整列表) |
-| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 81 个工具,JSON-RPC id=1 正确匹配 |
+| GET `/tools` | ✅ | 返回 90 个工具(完整列表) |
+| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 90 个工具,JSON-RPC id=1 正确匹配 |
 | 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
 | 完整 9 源 fetch 回调 | ✅ | 9 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
 | `github_module_timeline_analysis` ingest_first=false | ✅ | timeline_count=3 (research-mcp 仓库 src/tools.cpp) |

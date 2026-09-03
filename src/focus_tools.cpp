@@ -1,4 +1,8 @@
 #include "github_research/cache_manager.hpp"
+#include "github_research/focus_engine.hpp"
+#include "github_research/focus_attr_engine.hpp"
+#include "github_research/focus_track_engine.hpp"
+#include "github_research/focus_web_search.hpp"
 #include "github_research/curl_http_client.hpp"
 #include "github_research/string_utils.hpp"
 #include <iostream>
@@ -292,4 +296,169 @@ json ToolFocusPromote(const json& args) {
     return McpSuccessFocus(result);
 }
 
+// ── 11. focus_sprawl_tick: 执行一轮蔓延 tick ──────────────────
+json ToolFocusSprawlTick(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+
+    int max_nodes = get_int(args, "max_nodes_per_tick", 5);
+    bool dry_run = args.value("dry_run", false);
+
+    json result = focus_engine::run_sprawl_tick(focus_id, max_nodes, dry_run);
+    if (result.contains("error")) {
+        return McpErrorFocus(result["error"].get<std::string>());
+    }
+    return McpSuccessFocus(result);
+}
+
+// ── 12. focus_estimate_relevance: 估算实体相关性(调试) ────────
+json ToolFocusEstimateRelevance(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+
+    json candidate;
+    if (args.contains("entity_candidate") && args["entity_candidate"].is_object()) {
+        candidate = args["entity_candidate"];
+    } else {
+        // 简化:从 entity_name / entity_description 构造
+        std::string name = get_str(args, "entity_name");
+        std::string desc = get_str(args, "entity_description");
+        if (name.empty()) return McpErrorFocus("ERROR: entity_candidate or entity_name is required");
+        candidate["canonical_name"] = name;
+        if (!desc.empty()) candidate["description"] = desc;
+    }
+    std::string rel_type = get_str(args, "relation_type", "");
+    int depth = get_int(args, "depth", 1);
+
+    json result = focus_engine::estimate_relevance(focus_id, candidate, rel_type, depth);
+    return McpSuccessFocus(result);
+}
+
+// ── 13. focus_extract_tick: 对 focus 批量提取属性 ────────────
+json ToolFocusExtractTick(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+
+    int max_entities = get_int(args, "max_entities_per_tick", 10);
+    bool dry_run = args.value("dry_run", false);
+
+    json result = run_extract_tick(focus_id, max_entities, dry_run);
+    if (result.contains("error")) {
+        return McpErrorFocus(result["error"].get<std::string>());
+    }
+    return McpSuccessFocus(result);
+}
+
+// ── 14. focus_gaps_detect: 检测属性缺口 ──────────────────────
+json ToolFocusGapsDetect(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+
+    auto gaps = detect_gaps(focus_id);
+
+    json result;
+    result["focus_id"] = focus_id;
+    result["total_gaps"] = (int)gaps.size();
+    result["gaps"] = gaps;
+    return McpSuccessFocus(result);
+}
+
+// ── 15. focus_track_tick: 执行自适应跟踪 tick ────────────────
+json ToolFocusTrackTick(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+    int max_schedules = get_int(args, "max_schedules_per_tick", 10);
+    bool dry_run = args.value("dry_run", false);
+    json result = run_track_tick(focus_id, max_schedules, dry_run);
+    return McpSuccessFocus(result);
+}
+
+// ── 16. focus_updates_since: 类 RSS 查询增量 ──────────────────
+json ToolFocusUpdatesSince(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+    std::string since = get_str(args, "since", "");
+    json result = get_updates_since(focus_id, since);
+    return McpSuccessFocus(result);
+}
+
+// ── 17. web_search: 综合搜索引擎(Bing + Tavily + 缓存) ──────
+json ToolWebSearch(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+    std::string query = get_str(args, "query");
+    if (query.empty()) return McpErrorFocus("ERROR: query is required");
+    std::string focus_id = get_str(args, "focus_id");
+    int max_results = get_int(args, "max_results", 10);
+    std::string freshness = get_str(args, "freshness", "");
+    std::string mkt = get_str(args, "mkt", "en-US");
+    auto results = web_search(query, focus_id, max_results, freshness, mkt);
+    json out = json::array();
+    for (const auto& r : results) {
+        out.push_back({
+            {"title", r.title},
+            {"url", r.url},
+            {"snippet", r.snippet},
+            {"source_engine", r.source_engine}
+        });
+    }
+    json result;
+    result["query"] = query;
+    result["count"] = (int)out.size();
+    result["results"] = out;
+    return McpSuccessFocus(result);
+}
+
+// ── 18. focus_cross_gain: 多 focus 交叉增益 ──────────────────
+json ToolFocusCrossGain(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+    // 简化版:列出同时被多个 focus 引用的实体,建议提升优先级
+    json result;
+    result["focus_id"] = focus_id;
+    result["cross_focus_hits"] = json::array();
+    result["note"] = "cross-focus boost: needs full graph traversal, framework ready";
+    return McpSuccessFocus(result);
+}
+
+// ── 19. focus_export: 导出 focus 数据 ────────────────────────
+json ToolFocusExport(const json& args) {
+    CacheManager& cm = CacheManager::instance();
+    if (!cm.is_ready()) return McpErrorFocus("ERROR: cache not initialized");
+    std::string focus_id = get_str(args, "focus_id");
+    if (focus_id.empty()) return McpErrorFocus("ERROR: focus_id is required");
+    std::string format = get_str(args, "format", "json");
+    json focus = cm.get_focus(focus_id);
+    if (focus.empty()) return McpErrorFocus("ERROR: focus not found");
+    auto members = cm.get_focus_members(focus_id, "", 2000);
+    auto stats = cm.get_sprawl_stats(focus_id);
+    json result;
+    result["format"] = format;
+    result["focus"] = focus;
+    result["member_count"] = (int)members.size();
+    result["stats"] = stats;
+    if (format == "json") {
+        result["members"] = members;
+    }
+    result["note"] = "export: full JSON available, Markdown/OPML pending";
+    return McpSuccessFocus(result);
+}
 } // namespace github_research

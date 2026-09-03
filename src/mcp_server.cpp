@@ -2068,6 +2068,121 @@ json McpServer::handle_tools_list() {
                     })},
                     {"required", json::array({"focus_id","entity_id"})}
                 })}
+            },
+            {
+                {"name", "focus_sprawl_tick"},
+                {"description", "Execute one sprawl tick for a focus."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"max_nodes_per_tick", json::object({{"type","integer"}})},
+                        {"dry_run", json::object({{"type","boolean"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_estimate_relevance"},
+                {"description", "Debug: estimate relevance of candidate entity against focus."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"entity_name", json::object({{"type","string"}})},
+                        {"entity_description", json::object({{"type","string"}})},
+                        {"relation_type", json::object({{"type","string"}})},
+                        {"depth", json::object({{"type","integer"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_extract_tick"},
+                {"description", "Run attribute extraction tick for focus entities."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"max_entities_per_tick", json::object({{"type","integer"}})},
+                        {"dry_run", json::object({{"type","boolean"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_gaps_detect"},
+                {"description", "Detect attribute gaps in a focus."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_track_tick"},
+                {"description", "Run adaptive tracking tick for exhausted/seed nodes."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"max_schedules_per_tick", json::object({{"type","integer"}})},
+                        {"dry_run", json::object({{"type","boolean"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_updates_since"},
+                {"description", "RSS-style incremental query for a focus."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"since", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "web_search"},
+                {"description", "Multi-engine web search (Bing main + Tavily fallback) with caching."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"query", json::object({{"type","string"}})},
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"max_results", json::object({{"type","integer"}})},
+                        {"freshness", json::object({{"type","string"}})},
+                        {"mkt", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"query"})}
+                })}
+            },
+            {
+                {"name", "focus_cross_gain"},
+                {"description", "Find entities referenced by multiple focuses."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_export"},
+                {"description", "Export a focus domain as structured JSON."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"format", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
             }
         })}
     };
@@ -2096,6 +2211,7 @@ json McpServer::handle_tools_call(const json& params) {
     if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
     if (name.rfind("research_", 0) == 0) return dispatch_research_tool(name, args);
     if (name.rfind("wiki_", 0) == 0)     return dispatch_wiki_tool(name, args);
+    if (name == "web_search")           return dispatch_focus_tool(name, args);
     if (name.rfind("focus_", 0) == 0)    return dispatch_focus_tool(name, args);
     if (name.rfind("entity_", 0) == 0)   return dispatch_focus_tool(name, args);
 
@@ -2269,6 +2385,15 @@ json McpServer::dispatch_focus_tool(const std::string& tool_name, const json& ar
         // 人工干预
         if (tool_name == "focus_prune")   return ToolFocusPrune(args);
         if (tool_name == "focus_promote") return ToolFocusPromote(args);
+        if (tool_name == "focus_sprawl_tick") return ToolFocusSprawlTick(args);
+        if (tool_name == "focus_estimate_relevance") return ToolFocusEstimateRelevance(args);
+        if (tool_name == "focus_extract_tick") return ToolFocusExtractTick(args);
+        if (tool_name == "focus_gaps_detect") return ToolFocusGapsDetect(args);
+        if (tool_name == "focus_track_tick") return ToolFocusTrackTick(args);
+        if (tool_name == "focus_updates_since") return ToolFocusUpdatesSince(args);
+        if (tool_name == "web_search") return ToolWebSearch(args);
+        if (tool_name == "focus_cross_gain") return ToolFocusCrossGain(args);
+        if (tool_name == "focus_export") return ToolFocusExport(args);
     } catch (const std::exception& e) {
         DBG_LOG("focus") << "dispatch_focus_tool exception: " << e.what();
         return McpError(std::string("ERROR: focus tool exception: ") + e.what());

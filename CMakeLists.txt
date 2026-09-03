@@ -106,6 +106,10 @@ add_executable(research-mcp
     src/git_clone_source.cpp
     src/wiki_explorer.cpp
     src/focus_tools.cpp
+    src/focus_engine.cpp
+    src/focus_attr_engine.cpp
+    src/focus_track_engine.cpp
+    src/focus_web_search.cpp
     third_party/sqlite/sqlite3.c
 )
 

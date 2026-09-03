@@ -29,4 +29,15 @@ json ToolEntityAttrs(const json& args);
 json ToolFocusPrune(const json& args);
 json ToolFocusPromote(const json& args);
 
+// 蔓延引擎
+json ToolFocusSprawlTick(const json& args);
+json ToolFocusEstimateRelevance(const json& args);
+json ToolFocusExtractTick(const json& args);
+json ToolFocusGapsDetect(const json& args);
+json ToolFocusTrackTick(const json& args);
+json ToolFocusUpdatesSince(const json& args);
+json ToolWebSearch(const json& args);
+json ToolFocusCrossGain(const json& args);
+json ToolFocusExport(const json& args);
+
 } // namespace github_research
