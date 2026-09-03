@@ -449,6 +449,115 @@ CREATE TABLE IF NOT EXISTS file_cooccurrence (
     exec_sql("CREATE INDEX IF NOT EXISTS idx_fc_repo_a ON file_cooccurrence(repo_full_name, file_a);");
     exec_sql("CREATE INDEX IF NOT EXISTS idx_fc_repo_b ON file_cooccurrence(repo_full_name, file_b);");
 
+    // ═══════════════════════════════════════════════════════════
+    //  定向知识雷达 — Focus 管理层 (next.txt 定向蔓延)
+    // ═══════════════════════════════════════════════════════════
+
+    // 表 14: focuses (关注域)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS focuses (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    description     TEXT,
+    seed_entities   TEXT NOT NULL,
+    keywords        TEXT NOT NULL,
+    exclude_words   TEXT,
+    allowed_rels    TEXT NOT NULL,
+    allowed_sources TEXT,
+    max_depth       INTEGER DEFAULT 3,
+    relevance_threshold REAL DEFAULT 0.55,
+    max_nodes       INTEGER DEFAULT 500,
+    status          TEXT DEFAULT 'active',
+    created_at      INTEGER NOT NULL,
+    last_crawl_at   INTEGER
+);
+    )");
+
+    // 表 15: focus_members (实体-关注域关联)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS focus_members (
+    focus_id        TEXT NOT NULL REFERENCES focuses(id),
+    entity_id       TEXT NOT NULL,
+    depth           INTEGER NOT NULL,
+    relevance       REAL NOT NULL,
+    sprawl_status   TEXT NOT NULL,
+    last_checked    INTEGER,
+    check_count     INTEGER DEFAULT 0,
+    PRIMARY KEY (focus_id, entity_id)
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_fm_status   ON focus_members(focus_id, sprawl_status);");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_fm_relevance ON focus_members(focus_id, relevance DESC);");
+
+    // 表 16: attributes (属性级增量存储 — 蔓延核心)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS attributes (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id       TEXT NOT NULL,
+    attr_key        TEXT NOT NULL,
+    attr_value      TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    source_id       TEXT,
+    confidence      REAL NOT NULL DEFAULT 0.5,
+    verified        INTEGER DEFAULT 0,
+    extracted_at    INTEGER NOT NULL,
+    model           TEXT,
+    UNIQUE(entity_id, attr_key, attr_value, source)
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_attr_entity_key ON attributes(entity_id, attr_key);");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_attr_confidence  ON attributes(confidence);");
+
+    // 表 17: gaps (缺口调度)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS gaps (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    focus_id        TEXT NOT NULL REFERENCES focuses(id),
+    entity_id       TEXT NOT NULL,
+    missing_key     TEXT NOT NULL,
+    priority        REAL DEFAULT 0.5,
+    reason          TEXT,
+    fetch_plan      TEXT,
+    created_at      INTEGER NOT NULL,
+    resolved_at     INTEGER
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_gaps_unresolved ON gaps(resolved_at);");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_gaps_priority  ON gaps(focus_id, priority DESC);");
+
+    // 表 18: extraction_jobs (提取任务追踪)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS extraction_jobs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id       TEXT,
+    job_type        TEXT NOT NULL,
+    target_key      TEXT,
+    prompt          TEXT NOT NULL,
+    input_ref       TEXT,
+    status          TEXT DEFAULT 'pending',
+    result          TEXT,
+    attempts        INTEGER DEFAULT 0,
+    created_at      INTEGER NOT NULL,
+    completed_at    INTEGER
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_job_status ON extraction_jobs(status);");
+
+    // 表 19: track_schedules (自适应跟踪)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS track_schedules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    focus_id        TEXT NOT NULL REFERENCES focuses(id),
+    entity_id       TEXT NOT NULL,
+    track_type      TEXT NOT NULL,
+    interval_hours  INTEGER NOT NULL,
+    last_checked    INTEGER,
+    last_result     TEXT,
+    consecutive_empty INTEGER DEFAULT 0
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_ts_due ON track_schedules(last_checked);");
+
     inited_ = true;
     return true;
 }
@@ -2225,6 +2334,636 @@ std::vector<json> CacheManager::query_maintenance_attribution(const std::string&
     });
 
     return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  定向知识雷达 — Focus 管理层实现
+// ═══════════════════════════════════════════════════════════════════════
+
+static std::string now_iso() {
+    auto t = static_cast<int64_t>(std::time(nullptr));
+    std::time_t tt = static_cast<std::time_t>(t);
+    std::tm tm_utc{};
+    gmtime_s(&tm_utc, &tt);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+    return buf;
+}
+
+static int64_t now_sec() {
+    return static_cast<int64_t>(std::time(nullptr));
+}
+
+static std::string join_strings(const std::vector<std::string>& parts, const std::string& sep) {
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) out += sep;
+        out += parts[i];
+    }
+    return out;
+}
+
+static std::string gen_focus_id() {
+    // 类似 "f_3fa1b2"
+    static const char hex[] = "0123456789abcdef";
+    std::string id = "f_";
+    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    uint64_t h = static_cast<uint64_t>(now);
+    for (int i = 0; i < 6; ++i) {
+        id.push_back(hex[h & 0xF]);
+        h >>= 4;
+    }
+    return id;
+}
+
+std::string CacheManager::create_focus(
+    const std::string& name,
+    const std::string& description,
+    const std::vector<std::string>& seed_entity_ids,
+    const std::vector<std::string>& keywords,
+    const std::vector<std::string>& exclude_words,
+    int max_depth,
+    double relevance_threshold,
+    int max_nodes) {
+
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return "";
+
+    std::string id = gen_focus_id();
+    auto now = now_sec();
+
+    json seed_json = seed_entity_ids;
+    json kw_json = keywords;
+    json ex_json = exclude_words;
+    json rel_json = {"cites","author_of","depends_on","extends","competes_with","used_by","derived_from","evaluated_on"};
+
+    std::string sql = "INSERT INTO focuses (id, name, description, seed_entities, keywords, exclude_words, allowed_rels, max_depth, relevance_threshold, max_nodes, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return "";
+    auto bind_text = [&](int i, const std::string& s) {
+        sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT);
+    };
+    bind_text(1, id);
+    bind_text(2, name);
+    bind_text(3, description);
+    bind_text(4, seed_json.dump());
+    bind_text(5, kw_json.dump());
+    bind_text(6, ex_json.dump());
+    bind_text(7, rel_json.dump());
+    sqlite3_bind_int(stmt, 8, max_depth);
+    sqlite3_bind_double(stmt, 9, relevance_threshold);
+    sqlite3_bind_int(stmt, 10, max_nodes);
+    bind_text(11, "active");
+    sqlite3_bind_int64(stmt, 12, now);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    // 种子实体标记为 seed(depth=0, relevance=1.0, sprawl_status=seed)
+    for (const auto& eid : seed_entity_ids) {
+        sql = "INSERT OR IGNORE INTO focus_members (focus_id, entity_id, depth, relevance, sprawl_status) VALUES (?,?,?,?,?)";
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            bind_text(1, id);
+            bind_text(2, eid);
+            sqlite3_bind_int(stmt, 3, 0);
+            sqlite3_bind_double(stmt, 4, 1.0);
+            bind_text(5, "seed");
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    return id;
+}
+
+json CacheManager::get_focus(const std::string& focus_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    json result;
+    std::string sql = "SELECT * FROM focuses WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            result["id"] = (const char*)sqlite3_column_text(stmt, 0);
+            result["name"] = (const char*)sqlite3_column_text(stmt, 1);
+            const char* desc = (const char*)sqlite3_column_text(stmt, 2);
+            result["description"] = desc ? desc : "";
+            result["seed_entities"] = json::parse((const char*)sqlite3_column_text(stmt, 3));
+            result["keywords"] = json::parse((const char*)sqlite3_column_text(stmt, 4));
+            result["exclude_words"] = json::parse((const char*)sqlite3_column_text(stmt, 5));
+            result["allowed_rels"] = json::parse((const char*)sqlite3_column_text(stmt, 6));
+            result["max_depth"] = sqlite3_column_int(stmt, 7);
+            result["relevance_threshold"] = sqlite3_column_double(stmt, 8);
+            result["max_nodes"] = sqlite3_column_int(stmt, 9);
+            result["status"] = (const char*)sqlite3_column_text(stmt, 10);
+            result["created_at"] = sqlite3_column_int64(stmt, 11);
+            result["last_crawl_at"] = sqlite3_column_int64(stmt, 12);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return result;
+}
+
+std::vector<json> CacheManager::list_focuses() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> out;
+    std::string sql = "SELECT f.id, f.name, f.status, f.max_depth, f.relevance_threshold, f.max_nodes, COUNT(fm.entity_id) as node_count "
+                      "FROM focuses f LEFT JOIN focus_members fm ON fm.focus_id=f.id GROUP BY f.id ORDER BY f.created_at DESC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            json row;
+            row["id"] = (const char*)sqlite3_column_text(stmt, 0);
+            row["name"] = (const char*)sqlite3_column_text(stmt, 1);
+            row["status"] = (const char*)sqlite3_column_text(stmt, 2);
+            row["max_depth"] = sqlite3_column_int(stmt, 3);
+            row["relevance_threshold"] = sqlite3_column_double(stmt, 4);
+            row["max_nodes"] = sqlite3_column_int(stmt, 5);
+            row["node_count"] = sqlite3_column_int(stmt, 6);
+            out.push_back(std::move(row));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+bool CacheManager::update_focus(const std::string& focus_id, const json& patch) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    std::vector<std::string> sets;
+    std::vector<std::string> vals;
+    if (patch.contains("name") && patch["name"].is_string()) {
+        sets.push_back("name=?");
+        vals.push_back(patch["name"]);
+    }
+    if (patch.contains("description") && patch["description"].is_string()) {
+        sets.push_back("description=?");
+        vals.push_back(patch["description"]);
+    }
+    if (patch.contains("max_depth") && patch["max_depth"].is_number_integer()) {
+        sets.push_back("max_depth=?");
+        vals.push_back(std::to_string(patch["max_depth"].get<int>()));
+    }
+    if (patch.contains("relevance_threshold") && patch["relevance_threshold"].is_number()) {
+        sets.push_back("relevance_threshold=?");
+        vals.push_back(std::to_string(patch["relevance_threshold"].get<double>()));
+    }
+    if (patch.contains("status") && patch["status"].is_string()) {
+        sets.push_back("status=?");
+        vals.push_back(patch["status"]);
+    }
+    if (sets.empty()) return true;
+
+    std::string sql = "UPDATE focuses SET " + join_strings(sets, ",") + " WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    for (size_t i = 0; i < vals.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), vals[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_text(stmt, static_cast<int>(vals.size() + 1), focus_id.c_str(), -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+bool CacheManager::delete_focus(const std::string& focus_id, bool keep_entities) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    // 删除 focus 和其成员(实体数据在 entities/attributes 表中保留)
+    exec_sql("DELETE FROM focus_members WHERE focus_id='" + focus_id + "';");
+    exec_sql("DELETE FROM gaps WHERE focus_id='" + focus_id + "';");
+    exec_sql("DELETE FROM track_schedules WHERE focus_id='" + focus_id + "';");
+    exec_sql("DELETE FROM focuses WHERE id='" + focus_id + "';");
+    return true;
+}
+
+bool CacheManager::add_focus_member(const std::string& focus_id,
+                                     const std::string& entity_id,
+                                     int depth,
+                                     double relevance,
+                                     const std::string& sprawl_status) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    std::string sql = "INSERT OR IGNORE INTO focus_members (focus_id, entity_id, depth, relevance, sprawl_status) VALUES (?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+    bind_t(1, focus_id);
+    bind_t(2, entity_id);
+    sqlite3_bind_int(stmt, 3, depth);
+    sqlite3_bind_double(stmt, 4, relevance);
+    bind_t(5, sprawl_status);
+    sqlite3_step(stmt);
+    int changes = sqlite3_changes(db_);
+    sqlite3_finalize(stmt);
+    return changes > 0;
+}
+
+std::vector<json> CacheManager::get_focus_members(const std::string& focus_id,
+                                                   const std::string& status,
+                                                   int limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> out;
+    std::string sql = "SELECT fm.entity_id, fm.depth, fm.relevance, fm.sprawl_status, fm.check_count, fm.last_checked, "
+                      "ei.entity_type, ei.canonical_name "
+                      "FROM focus_members fm LEFT JOIN entity_index ei ON ei.entity_id=fm.entity_id "
+                      "WHERE fm.focus_id=?";
+    if (!status.empty()) sql += " AND fm.sprawl_status='" + status + "'";
+    sql += " ORDER BY fm.relevance DESC LIMIT " + std::to_string(limit);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            json row;
+            row["entity_id"] = (const char*)sqlite3_column_text(stmt, 0);
+            row["depth"] = sqlite3_column_int(stmt, 1);
+            row["relevance"] = sqlite3_column_double(stmt, 2);
+            row["sprawl_status"] = (const char*)sqlite3_column_text(stmt, 3);
+            row["check_count"] = sqlite3_column_int(stmt, 4);
+            row["last_checked"] = sqlite3_column_int64(stmt, 5);
+            const char* et = (const char*)sqlite3_column_text(stmt, 6);
+            row["entity_type"] = et ? et : "";
+            const char* cn = (const char*)sqlite3_column_text(stmt, 7);
+            row["canonical_name"] = cn ? cn : "";
+            out.push_back(std::move(row));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+bool CacheManager::update_member_status(const std::string& focus_id,
+                                         const std::string& entity_id,
+                                         const std::string& new_status,
+                                         double new_relevance) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::string sql;
+    sqlite3_stmt* stmt = nullptr;
+    if (new_relevance >= 0) {
+        sql = "UPDATE focus_members SET sprawl_status=?, relevance=?, last_checked=? WHERE focus_id=? AND entity_id=?";
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, new_status);
+        sqlite3_bind_double(stmt, 2, new_relevance);
+        sqlite3_bind_int64(stmt, 3, now_sec());
+        bind_t(4, focus_id);
+        bind_t(5, entity_id);
+    } else {
+        sql = "UPDATE focus_members SET sprawl_status=?, last_checked=? WHERE focus_id=? AND entity_id=?";
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, new_status);
+        sqlite3_bind_int64(stmt, 2, now_sec());
+        bind_t(3, focus_id);
+        bind_t(4, entity_id);
+    }
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// ── attributes ─────────────────────────────────────────────
+int CacheManager::upsert_attribute(const std::string& entity_id,
+                                    const std::string& attr_key,
+                                    const std::string& attr_value_json,
+                                    const std::string& source,
+                                    double confidence) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return 0;
+    int64_t now = now_sec();
+    std::string sql = "INSERT OR IGNORE INTO attributes (entity_id, attr_key, attr_value, source, confidence, extracted_at) VALUES (?,?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+    bind_t(1, entity_id);
+    bind_t(2, attr_key);
+    bind_t(3, attr_value_json);
+    bind_t(4, source);
+    sqlite3_bind_double(stmt, 5, confidence);
+    sqlite3_bind_int64(stmt, 6, now);
+    sqlite3_step(stmt);
+    int changes = sqlite3_changes(db_);
+    sqlite3_finalize(stmt);
+    return changes;
+}
+
+std::vector<json> CacheManager::get_attributes(const std::string& entity_id, const std::string& attr_key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> out;
+    std::string sql = "SELECT entity_id, attr_key, attr_value, source, confidence, verified, extracted_at, model FROM attributes WHERE entity_id=?";
+    if (!attr_key.empty()) sql += " AND attr_key='" + attr_key + "'";
+    sql += " ORDER BY confidence DESC, verified DESC";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, entity_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            json row;
+            row["entity_id"] = (const char*)sqlite3_column_text(stmt, 0);
+            row["attr_key"] = (const char*)sqlite3_column_text(stmt, 1);
+            row["attr_value"] = (const char*)sqlite3_column_text(stmt, 2);
+            row["source"] = (const char*)sqlite3_column_text(stmt, 3);
+            row["confidence"] = sqlite3_column_double(stmt, 4);
+            row["verified"] = sqlite3_column_int(stmt, 5);
+            row["extracted_at"] = sqlite3_column_int64(stmt, 6);
+            const char* m = (const char*)sqlite3_column_text(stmt, 7);
+            row["model"] = m ? m : "";
+            out.push_back(std::move(row));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+json CacheManager::get_merged_attribute(const std::string& entity_id, const std::string& attr_key) {
+    auto attrs = get_attributes(entity_id, attr_key);
+    if (attrs.empty()) return json();
+    // 多源合并:相同值合并,不同值按最高 confidence 取
+    std::map<std::string, double> value_scores;
+    std::map<std::string, std::vector<std::string>> value_sources;
+    for (const auto& a : attrs) {
+        std::string v = a.value("attr_value", "");
+        double c = a.value("confidence", 0.5);
+        value_scores[v] += c;
+        value_sources[v].push_back(a.value("source", ""));
+    }
+    std::string best_value;
+    double best_score = -1;
+    for (auto& kv : value_scores) {
+        if (kv.second > best_score) {
+            best_score = kv.second;
+            best_value = kv.first;
+        }
+    }
+    json result;
+    result["value"] = best_value;
+    result["confidence"] = best_score / value_scores.size();
+    result["source_count"] = attrs.size();
+    result["sources"] = value_sources[best_value];
+    return result;
+}
+
+// ── gaps ─────────────────────────────────────────────────
+int CacheManager::upsert_gap(const std::string& focus_id,
+                               const std::string& entity_id,
+                               const std::string& missing_key,
+                               double priority,
+                               const std::string& reason,
+                               const std::string& fetch_plan_json) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return 0;
+    // 先看是否已有未解决的同缺口
+    std::string check_sql = "SELECT id FROM gaps WHERE focus_id=? AND entity_id=? AND missing_key=? AND resolved_at IS NULL";
+    sqlite3_stmt* stmt = nullptr;
+    int64_t existing = 0;
+    if (sqlite3_prepare_v2(db_, check_sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, focus_id); bind_t(2, entity_id); bind_t(3, missing_key);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            existing = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (existing > 0) {
+        // 更新优先级(取更高的)
+        std::string upd = "UPDATE gaps SET priority=MAX(priority, ?) WHERE id=?";
+        if (sqlite3_prepare_v2(db_, upd.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_double(stmt, 1, priority);
+            sqlite3_bind_int64(stmt, 2, existing);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+        return static_cast<int>(existing);
+    }
+    int64_t now = now_sec();
+    std::string ins = "INSERT INTO gaps (focus_id, entity_id, missing_key, priority, reason, fetch_plan, created_at) VALUES (?,?,?,?,?,?,?)";
+    if (sqlite3_prepare_v2(db_, ins.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, focus_id); bind_t(2, entity_id); bind_t(3, missing_key);
+        sqlite3_bind_double(stmt, 4, priority);
+        bind_t(5, reason); bind_t(6, fetch_plan_json);
+        sqlite3_bind_int64(stmt, 7, now);
+        sqlite3_step(stmt);
+        int64_t id = sqlite3_last_insert_rowid(db_);
+        sqlite3_finalize(stmt);
+        return static_cast<int>(id);
+    }
+    return 0;
+}
+
+std::vector<json> CacheManager::get_gaps(const std::string& focus_id, double min_priority, int limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> out;
+    std::string sql = "SELECT id, entity_id, missing_key, priority, reason, created_at FROM gaps WHERE focus_id=? AND resolved_at IS NULL AND priority>=? ORDER BY priority DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_double(stmt, 2, min_priority);
+        sqlite3_bind_int(stmt, 3, limit);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            json row;
+            row["id"] = sqlite3_column_int64(stmt, 0);
+            row["entity_id"] = (const char*)sqlite3_column_text(stmt, 1);
+            row["missing_key"] = (const char*)sqlite3_column_text(stmt, 2);
+            row["priority"] = sqlite3_column_double(stmt, 3);
+            const char* r = (const char*)sqlite3_column_text(stmt, 4);
+            row["reason"] = r ? r : "";
+            row["created_at"] = sqlite3_column_int64(stmt, 5);
+            out.push_back(std::move(row));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+bool CacheManager::resolve_gap(int64_t gap_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    std::string sql = "UPDATE gaps SET resolved_at=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int64(stmt, 1, now_sec());
+    sqlite3_bind_int64(stmt, 2, gap_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// ── extraction_jobs ────────────────────────────────────────
+int64_t CacheManager::create_extraction_job(const std::string& entity_id,
+                                              const std::string& job_type,
+                                              const std::string& prompt,
+                                              const std::string& input_ref) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return 0;
+    std::string sql = "INSERT INTO extraction_jobs (entity_id, job_type, prompt, input_ref, created_at) VALUES (?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+    bind_t(1, entity_id); bind_t(2, job_type); bind_t(3, prompt); bind_t(4, input_ref);
+    sqlite3_bind_int64(stmt, 5, now_sec());
+    sqlite3_step(stmt);
+    int64_t id = sqlite3_last_insert_rowid(db_);
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+bool CacheManager::update_extraction_job(int64_t job_id,
+                                           const std::string& status,
+                                           const std::string& result_json,
+                                           const std::string& error) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    std::string sql;
+    sqlite3_stmt* stmt = nullptr;
+    if (status == "done" || status == "failed" || status == "empty") {
+        sql = "UPDATE extraction_jobs SET status=?, result=?, completed_at=? WHERE id=?";
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, status); bind_t(2, result_json);
+        sqlite3_bind_int64(stmt, 3, now_sec());
+        sqlite3_bind_int64(stmt, 4, job_id);
+    } else {
+        sql = "UPDATE extraction_jobs SET status=? WHERE id=?";
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+        auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+        bind_t(1, status);
+        sqlite3_bind_int64(stmt, 2, job_id);
+    }
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// ── track_schedules ────────────────────────────────────────
+int CacheManager::create_track_schedule(const std::string& focus_id,
+                                         const std::string& entity_id,
+                                         const std::string& track_type,
+                                         int interval_hours) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return 0;
+    std::string sql = "INSERT INTO track_schedules (focus_id, entity_id, track_type, interval_hours) VALUES (?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return 0;
+    auto bind_t = [&](int i, const std::string& s) { sqlite3_bind_text(stmt, i, s.c_str(), -1, SQLITE_TRANSIENT); };
+    bind_t(1, focus_id); bind_t(2, entity_id); bind_t(3, track_type);
+    sqlite3_bind_int(stmt, 4, interval_hours);
+    sqlite3_step(stmt);
+    int id = static_cast<int>(sqlite3_last_insert_rowid(db_));
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+std::vector<json> CacheManager::get_due_tracks(int limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> out;
+    int64_t now = now_sec();
+    std::string sql = "SELECT id, focus_id, entity_id, track_type, interval_hours, consecutive_empty FROM track_schedules WHERE last_checked IS NULL OR (? - last_checked) >= interval_hours*3600 ORDER BY consecutive_empty ASC, interval_hours ASC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, now);
+        sqlite3_bind_int(stmt, 2, limit);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            json row;
+            row["id"] = sqlite3_column_int(stmt, 0);
+            row["focus_id"] = (const char*)sqlite3_column_text(stmt, 1);
+            row["entity_id"] = (const char*)sqlite3_column_text(stmt, 2);
+            row["track_type"] = (const char*)sqlite3_column_text(stmt, 3);
+            row["interval_hours"] = sqlite3_column_int(stmt, 4);
+            row["consecutive_empty"] = sqlite3_column_int(stmt, 5);
+            out.push_back(std::move(row));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return out;
+}
+
+bool CacheManager::update_track_interval(int schedule_id, int new_interval_hours) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!inited_) return false;
+    std::string sql = "UPDATE track_schedules SET interval_hours=?, last_checked=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, new_interval_hours);
+    sqlite3_bind_int64(stmt, 2, now_sec());
+    sqlite3_bind_int(stmt, 3, schedule_id);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE;
+}
+
+// ── 蔓延统计 ────────────────────────────────────────────────
+json CacheManager::get_sprawl_stats(const std::string& focus_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    json stats;
+    // 总 entities
+    int64_t n_entities = 0;
+    if (focus_id.empty()) {
+        std::string sql = "SELECT COUNT(*) FROM entity_index";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            n_entities = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    } else {
+        std::string sql = "SELECT COUNT(*) FROM focus_members WHERE focus_id=?";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(stmt) == SQLITE_ROW) n_entities = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    stats["entities"] = n_entities;
+
+    // attributes 数量
+    int64_t n_attr = 0;
+    {
+        std::string sql = "SELECT COUNT(*) FROM attributes";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            n_attr = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    stats["attributes"] = n_attr;
+
+    // relations 数量
+    int64_t n_rel = 0;
+    {
+        std::string sql = "SELECT COUNT(*) FROM relation_links";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            n_rel = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    stats["relations"] = n_rel;
+
+    // gaps 数量
+    int64_t n_gaps = 0;
+    {
+        std::string sql = "SELECT COUNT(*) FROM gaps WHERE resolved_at IS NULL";
+        if (!focus_id.empty()) sql += " AND focus_id='" + focus_id + "'";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            n_gaps = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    stats["open_gaps"] = n_gaps;
+
+    // active focuses 数量
+    int64_t n_focuses = 0;
+    {
+        std::string sql = "SELECT COUNT(*) FROM focuses WHERE status='active'";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            n_focuses = sqlite3_column_int64(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    stats["active_focuses"] = n_focuses;
+
+    return stats;
 }
 
 } // namespace github_research

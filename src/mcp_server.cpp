@@ -9,6 +9,7 @@
 #include "github_research/package_tools.hpp"
 #include "github_research/paperswithcode_tools.hpp"
 #include "github_research/huggingface_tools.hpp"
+#include "github_research/focus_tools.hpp"
 #include "github_research/semanticscholar_tools.hpp"
 #include "github_research/stackoverflow_tools.hpp"
 #include "github_research/webview_helpers.hpp"
@@ -1944,6 +1945,129 @@ json McpServer::handle_tools_list() {
                     })},
                     {"required", json::array({"root_canonical_uri","sub_path"})}
                 })}
+            },
+            // ═══════════════════════════════════════════════════════════
+            //  定向知识雷达 — Focus 工具 (next.txt)
+            // ═══════════════════════════════════════════════════════════
+            {
+                {"name", "focus_create"},
+                {"description", "Create a focus domain (定向知识雷达): define what to track, seed entities to start from, and let the system automatically discover and expand related entities over time."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"name", json::object({{"type","string"},{"description","Focus name (e.g. 'Transformer 架构演进')"}})},
+                        {"description", json::object({{"type","string"},{"description","Natural language description of what to track"}})},
+                        {"seed_entity_ids", json::object({{"type","array"},{"items",{{"type","string"}}},{"description","Existing entity IDs as seeds"}})},
+                        {"seed_queries", json::object({{"type","array"},{"items",{{"type","string"}}},{"description","Search terms to find seed entities"}})},
+                        {"keywords", json::object({{"type","array"},{"items",{{"type","string"}}},{"description","Positive keywords for relevance scoring"}})},
+                        {"exclude_words", json::object({{"type","array"},{"items",{{"type","string"}}},{"description","Words that reduce relevance score"}})},
+                        {"max_depth", json::object({{"type","integer"},{"minimum",1},{"maximum",5},{"default",3}})},
+                        {"relevance_threshold", json::object({{"type","number"},{"minimum",0},{"maximum",1},{"default",0.55}})},
+                        {"max_nodes", json::object({{"type","integer"},{"minimum",10},{"maximum",2000},{"default",500}})}
+                    })},
+                    {"required", json::array({"name"})}
+                })}
+            },
+            {
+                {"name", "focus_list"},
+                {"description", "List all focus domains with node counts and status."},
+                {"inputSchema", json::object({{"type","object"},{"properties",json::object()}})}
+            },
+            {
+                {"name", "focus_get"},
+                {"description", "Get focus domain details including keywords, seeds, thresholds, and sprawl stats."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"},{"description","Focus ID (e.g. f_3fa1b2)"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_delete"},
+                {"description", "Delete a focus domain. Entity data can be preserved for other focuses."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"keep_entities", json::object({{"type","boolean"},{"default",true}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_members"},
+                {"description", "List entities belonging to a focus domain, filtered by sprawl_status."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"sprawl_status", json::object({{"type","string"},{"enum",json::array({"seed","active","boundary","pruned","exhausted"})}})},
+                        {"limit", json::object({{"type","integer"},{"default",100}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_gaps"},
+                {"description", "List unresolved gaps (missing attributes) for a focus domain, sorted by priority."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"min_priority", json::object({{"type","number"},{"default",0.0}})},
+                        {"limit", json::object({{"type","integer"},{"default",20}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_stats"},
+                {"description", "Get sprawl progress: entity count, attribute count, relation count, open gaps, status breakdown."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"},{"description","Optional: if empty, returns global stats"}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "entity_attrs"},
+                {"description", "Query all attributes of an entity, optionally filter by attr_key. Returns multi-source values and merged result."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"entity_id", json::object({{"type","string"}})},
+                        {"attr_key", json::object({{"type","string"},{"description","Optional: filter by key (e.g. 'authors', 'repo_url')"}})}
+                    })},
+                    {"required", json::array({"entity_id"})}
+                })}
+            },
+            {
+                {"name", "focus_prune"},
+                {"description", "Manually prune (set sprawl_status=pruned) a focus member entity to stop further expansion."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"entity_id", json::object({{"type","string"}})},
+                        {"reason", json::object({{"type","string"},{"default","manual_prune"}})}
+                    })},
+                    {"required", json::array({"focus_id","entity_id"})}
+                })}
+            },
+            {
+                {"name", "focus_promote"},
+                {"description", "Manually promote (set sprawl_status=active) a boundary/pruned entity to enable expansion."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"entity_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id","entity_id"})}
+                })}
             }
         })}
     };
@@ -1972,6 +2096,8 @@ json McpServer::handle_tools_call(const json& params) {
     if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
     if (name.rfind("research_", 0) == 0) return dispatch_research_tool(name, args);
     if (name.rfind("wiki_", 0) == 0)     return dispatch_wiki_tool(name, args);
+    if (name.rfind("focus_", 0) == 0)    return dispatch_focus_tool(name, args);
+    if (name.rfind("entity_", 0) == 0)   return dispatch_focus_tool(name, args);
 
     // GitHub 工具走原路径
     return dispatch_tool_call(client_, params);
@@ -2121,6 +2247,34 @@ int McpServer::run_http(int port) {
     int rc = server.run();
     log("http server shutting down");
     return rc;
+}
+
+// ═════════════════════════════════════════════════════════════
+//  定向知识雷达 — Focus 工具分发
+// ═════════════════════════════════════════════════════════════
+json McpServer::dispatch_focus_tool(const std::string& tool_name, const json& args) {
+    DBG_LOG("focus") << "dispatch_focus_tool: " << tool_name;
+    try {
+        // Focus 管理
+        if (tool_name == "focus_create")  return ToolFocusCreate(args);
+        if (tool_name == "focus_list")    return ToolFocusList(args);
+        if (tool_name == "focus_get")     return ToolFocusGet(args);
+        if (tool_name == "focus_delete")  return ToolFocusDelete(args);
+        // 成员 & 缺口 & 统计
+        if (tool_name == "focus_members") return ToolFocusMembers(args);
+        if (tool_name == "focus_gaps")    return ToolFocusGaps(args);
+        if (tool_name == "focus_stats")   return ToolFocusStats(args);
+        // 实体属性查询
+        if (tool_name == "entity_attrs")  return ToolEntityAttrs(args);
+        // 人工干预
+        if (tool_name == "focus_prune")   return ToolFocusPrune(args);
+        if (tool_name == "focus_promote") return ToolFocusPromote(args);
+    } catch (const std::exception& e) {
+        DBG_LOG("focus") << "dispatch_focus_tool exception: " << e.what();
+        return McpError(std::string("ERROR: focus tool exception: ") + e.what());
+    }
+    DBG_LOG("focus") << "dispatch_focus_tool: unknown tool " << tool_name;
+    return McpError("ERROR: unknown focus tool: " + tool_name);
 }
 
 } // namespace github_research

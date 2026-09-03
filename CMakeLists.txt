@@ -84,6 +84,7 @@ add_executable(research-mcp
     src/curl_http_client.cpp
     src/arxiv_tools.cpp
     src/hackernews_tools.cpp
+    src/hn_firebase.cpp
     src/package_tools.cpp
     src/paperswithcode_tools.cpp
     src/huggingface_tools.cpp
@@ -104,6 +105,7 @@ add_executable(research-mcp
     src/local_fs_source.cpp
     src/git_clone_source.cpp
     src/wiki_explorer.cpp
+    src/focus_tools.cpp
     third_party/sqlite/sqlite3.c
 )
 

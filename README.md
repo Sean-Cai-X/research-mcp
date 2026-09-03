@@ -115,7 +115,7 @@ From Serial → Parallel Inference
 ┌────────────────────────────────────────────────────────────────┐
 │  dispatch_<source>_tool  (按工具名前缀路由)                      │
 │  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (4) /          │
-│  pwc_*   (5) / hf_*   (7) / s2_*    (6) / so_*    (5)          │
+│  pwc_*   (5) / hf_*   (9) / s2_*    (7) / so_*    (6)          │
 │  + github_module_timeline_analysis (L2/L3)                      │
 │  + github_subdir_timeline_slice    (原语A:子模块切片)            │
 │  + github_maintenance_attribution  (原语B:维护链路归因)          │
@@ -127,11 +127,12 @@ From Serial → Parallel Inference
    ▼             ▼             ▼             ▼             ▼
 ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
 │GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ ...  │
-│Client│ │Session│ │Session│ │Session│ │Session│ │ ...
-│libcurl│ │WebView2│ │WebView2│ │WebView2│ │WebView2│ │
-│  +   │ │  +   │ │  +   │ │      │ │      │ │
-│Cache │ │Cache │ │Cache │ │Cache │ │Cache │ │
-│ +Entity +Entity +Entity                                    │
+│Client│ │Session│ │混合  │ │Session│ │Session│ │ ...
+│libcurl│ │WebView2│ │后端  │ │WebView2│ │WebView2│ │
+│  +   │ │  +   │ │Firebase│ │      │ │      │ │
+│Cache │ │Cache │ │API + │ │Cache │ │Cache │ │
+│      │ │Entity │ │WebView2│ │      │ │      │ │
+│      │ │       │ │兜底  │ │      │ │      │ │
 └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
    │        │        │        │        │        │
    └────────┴────────┴────────┴────────┴────────┘
@@ -156,6 +157,8 @@ From Serial → Parallel Inference
                           │  L3: 关联图谱 (跨源)       │
                           └──────────────────────────┘
 ```
+
+> **HN 特殊架构**:索引类工具(`hn_get_top_stories` / `hn_get_new_stories` / `hn_get_best_stories` / `hn_get_latest_index`)优先走 Hacker News Firebase REST API(`hacker-news.firebaseio.com/v0/`)——纯 libcurl HTTP,无需 WebView2,响应 <500ms,支持批量 item 详情缓存。WebView2 仅作为兜底(API 不可用时回退爬 `news.ycombinator.com`)。深度类工具(`hn_get_item` / `hn_search_by_keyword` / `hn_fetch_detailed_story`)仍需 WebView2 导航 HN 页面或外部文章。
 
 ### 调用模式(所有源统一)
 
@@ -190,16 +193,16 @@ From Serial → Parallel Inference
 
 ### 会话隔离(每个源独立 WebView2 + user data dir)
 
-| 源 | 类 | user data dir 参数 | 数据源 ID |
-|---|---|---|---|
-| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` | `github_api` |
-| arXiv | `WebViewSession` | `--arxiv-profile` | `arxiv_web` |
-| Hacker News | `WebViewSession` | `--hn-profile` | `hn_web` |
-| npm/PyPI | `WebViewSession` | `--pkg-profile` | `pkg_web` |
-| Papers with Code | `WebViewSession` | `--pwc-profile` | `pwc_web` |
-| Hugging Face | `WebViewSession` | `--hf-profile` | `hf_web` |
-| Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` |
-| Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` |
+| 源 | 类 | user data dir 参数 | 数据源 ID | 索引类 | 深度类 |
+|---|---|---|---|---|---|
+| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` | `github_api` | — | — |
+| arXiv | `WebViewSession` | `--arxiv-profile` | `arxiv_web` | — | — |
+| Hacker News | `WebViewSession` + **Firebase REST**(新增) | `--hn-profile`(深度类) | `hn_web` / `hn_fb_list` / `hn_fb_item` | Firebase API | WebView2 |
+| npm/PyPI | `WebViewSession` | `--pkg-profile` | `pkg_web` | — | — |
+| Papers with Code | `WebViewSession` | `--pwc-profile` | `pwc_web` | — | — |
+| Hugging Face | `WebViewSession` | `--hf-profile` | `hf_web` | — | — |
+| Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` | — | — |
+| Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` | — | — |
 
 ## 统一 SQLite 缓存层(WAL + 5 张表)
 
@@ -229,6 +232,18 @@ if (cached && cached->fetch_status == "ok" && cm.is_fresh("arxiv", cache_key)) {
 cm.put("arxiv", "paper:2401.01330", payload, "json", 72, "", "ok", "");
 cm.put("arxiv", "paper:2401.01330", "",        "json", 1,  "", "failed", "network_error");
 ```
+
+### Firebase REST API 缓存策略
+
+HN Firebase 层使用 `hn_fb_list` / `hn_fb_item` 两个 source_type:
+
+| source_type | cache_key 示例 | TTL | 内容 | fetch_status |
+|---|---|---|---|---|
+| `hn_fb_list` | `hn_fb_topstories` / `hn_fb_newstories` | 1h | ID 列表 JSON(如 `[41569345, ...]`) | `ok` |
+| `hn_fb_item` | `41569345`(story ID) | 12h | item 完整详情 JSON(title/url/score/descendants/by/time) | `ok` |
+| `hn_fb_item` | `99999999`(不存在的 ID) | 6h | `"null"` | `not_found` |
+
+> **离线可用**:首次调用 `hn_get_top_stories(count=100)` 会批量拉 100 个 item 详情存入 SQLite。后续调用(即使无网络)也能命中缓存返回完整数据。
 
 ### Entity Mapper + 关系图谱
 
@@ -730,15 +745,21 @@ $r.result.content[0].text
 
 ### Hacker News(7 个)
 
-| 工具 | 说明 |
-|---|---|
-| `hn_get_top_stories` | 头条故事 |
-| `hn_get_new_stories` | 最新故事 |
-| `hn_get_best_stories` | 精选故事 |
-| `hn_get_item` | 获取单个 item(故事 / 评论) |
-| `hn_search_by_keyword` | 按关键词搜索 |
-| `hn_get_latest_index` | 最新索引快照 |
-| `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 |
+| 工具 | 说明 | 后端 | 需要 `--hn-profile` |
+|---|---|---|---|
+| `hn_get_top_stories` | 头条故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
+| `hn_get_new_stories` | 最新故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
+| `hn_get_best_stories` | 精选故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
+| `hn_get_latest_index` | 最新索引快照 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
+| `hn_get_item` | 获取单个 item(故事 / 评论) | WebView2 | ✅ 需要 |
+| `hn_search_by_keyword` | 按关键词搜索 | WebView2(hn.algolia.com) | ✅ 需要 |
+| `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 | WebView2(导航 HN item 页 + 可选外部文章) | ✅ 需要 |
+
+> **Firebase REST API**(`hacker-news.firebaseio.com/v0/`)是 HN 官方提供的免费、无认证、纯 JSON 接口:
+> - `/v0/topstories.json` / `/v0/newstories.json` / `/v0/beststories.json` → 最多 500 个 story ID 的数组
+> - `/v0/item/{id}.json` → 单个 item 完整详情(title/url/score/descendants/by/time/kids)
+> - 4 个索引工具批量获取 item 详情时,CacheManager 先查缓存(item TTL=12h,ID 列表 TTL=1h),命中直接返回,离线也可用
+> - 比 WebView2 爬页面快 **10 倍以上**(<500ms vs 3-5s),无页面结构依赖,稳定性大幅提升
 
 ### npm / PyPI(5 个)
 
@@ -906,7 +927,10 @@ GitHub API 限流(每小时 60 次/未认证)。解决:
 
 ### `session not initialized`
 
-对应源的 `--xxx-profile` 参数未指定。检查启动命令是否包含全部 9 个 `--xxx-profile` 参数。
+对应源的 `--xxx-profile` 参数未指定。**注意**:部分工具已改为纯 HTTP,不再需要 WebView2:
+- ✅ **不需要 `--hn-profile`**: `hn_get_top_stories` / `hn_get_new_stories` / `hn_get_best_stories` / `hn_get_latest_index`(Firebase REST API)
+- ❌ **需要 `--hn-profile`**: `hn_get_item` / `hn_search_by_keyword` / `hn_fetch_detailed_story`
+- 其他源(arXiv / Pkg / PWC / HF / S2 / SO)的所有工具仍需 `--xxx-profile`
 
 ### `fetch_result preview: {}`
 

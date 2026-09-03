@@ -117,6 +117,7 @@ private:
     json dispatch_so_tool(const std::string& tool_name, const json& args);
     json dispatch_research_tool(const std::string& tool_name, const json& args);
     json dispatch_wiki_tool(const std::string& tool_name, const json& args);
+    json dispatch_focus_tool(const std::string& tool_name, const json& args);
 
     // Initialize 9-source datasource registry (lazy, on first wiki tool call)
     void init_datasource_registry();

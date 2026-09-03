@@ -358,6 +358,97 @@ public:
                                                      int64_t since = 0,
                                                      int limit = 50);
 
+    // ═══════════════════════════════════════════════════════════
+    //  定向知识雷达 — Focus 管理 (next.txt 定向蔓延)
+    // ═══════════════════════════════════════════════════════════
+
+    // ── Focus CRUD ──────────────────────────────────────────
+    std::string create_focus(const std::string& name,
+                             const std::string& description,
+                             const std::vector<std::string>& seed_entity_ids,
+                             const std::vector<std::string>& keywords,
+                             const std::vector<std::string>& exclude_words = {},
+                             int max_depth = 3,
+                             double relevance_threshold = 0.55,
+                             int max_nodes = 500);
+
+    json get_focus(const std::string& focus_id);
+    std::vector<json> list_focuses();
+    bool update_focus(const std::string& focus_id, const json& patch);
+    bool delete_focus(const std::string& focus_id, bool keep_entities = true);
+
+    // ── Focus 成员 ───────────────────────────────────────────
+    // 添加实体到 focus,自动计算 depth(基于已有成员的最小 depth+1)
+    // 返回是否新增(vs 已存在)
+    bool add_focus_member(const std::string& focus_id,
+                          const std::string& entity_id,
+                          int depth,
+                          double relevance,
+                          const std::string& sprawl_status = "active");
+
+    std::vector<json> get_focus_members(const std::string& focus_id,
+                                        const std::string& status = "",
+                                        int limit = 100);
+
+    bool update_member_status(const std::string& focus_id,
+                              const std::string& entity_id,
+                              const std::string& new_status,
+                              double new_relevance = -1.0);
+
+    // ── 属性级增量存储 (next.txt attributes 表) ──────────────
+    // 写入一条属性,UNIQUE(entity_id, attr_key, attr_value, source)
+    // 重复调用同值不同 source 会新增行(多源融合)
+    int upsert_attribute(const std::string& entity_id,
+                         const std::string& attr_key,
+                         const std::string& attr_value_json,
+                         const std::string& source,
+                         double confidence = 0.5);
+
+    // 读取某实体某 key 的所有属性(多源)
+    std::vector<json> get_attributes(const std::string& entity_id,
+                                      const std::string& attr_key = "");
+
+    // 某实体某 key 的多源合并结果
+    json get_merged_attribute(const std::string& entity_id, const std::string& attr_key);
+
+    // ── 缺口检测与调度 (next.txt gaps 表) ───────────────────
+    int upsert_gap(const std::string& focus_id,
+                   const std::string& entity_id,
+                   const std::string& missing_key,
+                   double priority,
+                   const std::string& reason = "",
+                   const std::string& fetch_plan_json = "");
+
+    std::vector<json> get_gaps(const std::string& focus_id,
+                               double min_priority = 0.0,
+                               int limit = 20);
+
+    bool resolve_gap(int64_t gap_id);
+
+    // ── 提取任务 (next.txt extraction_jobs 表) ────────────────
+    int64_t create_extraction_job(const std::string& entity_id,
+                                  const std::string& job_type,
+                                  const std::string& prompt,
+                                  const std::string& input_ref = "");
+
+    bool update_extraction_job(int64_t job_id,
+                               const std::string& status,
+                               const std::string& result_json = "",
+                               const std::string& error = "");
+
+    // ── 跟踪计划 (next.txt track_schedules 表) ───────────────
+    int create_track_schedule(const std::string& focus_id,
+                              const std::string& entity_id,
+                              const std::string& track_type,
+                              int interval_hours);
+
+    std::vector<json> get_due_tracks(int limit = 30);
+
+    bool update_track_interval(int schedule_id, int new_interval_hours);
+
+    // ── 蔓延统计 ─────────────────────────────────────────────
+    json get_sprawl_stats(const std::string& focus_id = "");
+
 private:
     CacheManager() = default;
     ~CacheManager() { shutdown(); }
