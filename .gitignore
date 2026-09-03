@@ -67,3 +67,6 @@ Desktop.ini
 .idea/
 .vscode/
 *.swp
+/_tmp_verify.py
+/_tmp_analyze.py
+/other

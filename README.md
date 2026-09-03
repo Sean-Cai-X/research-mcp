@@ -4,20 +4,21 @@
 
 ## 特性
 
-- **9 源 71 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **9 源 81 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
 - **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走 **WebView2**(完整 Chromium 指纹、JS 渲染、DOM 提取)
 - **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
 - **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
 - **多实例会话隔离**:每个网页源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
 - **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
-- **统一 SQLite 缓存层(WAL + 5 张表)**:cache_entries / cache_blobs / entities / relations / metrics
+- **统一 SQLite 缓存层(WAL + 14 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + **定向知识雷达 6 张表**(focuses / focus_members / attributes / gaps / extraction_jobs / track_schedules)
 - **多源融合 + 字段级策略**:UNION / LATEST,自动按 source reliability 排序
 - **熔断器 + 降级链**:主源失败自动切换备用源,所有源失败返回陈旧缓存(stale)
 - **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、记录时间快照
 - **三层观测体系**:L1 项目概览(13 个 github_* 工具) / L2 单点深挖(局部对象连续动态分析索引) / L3 关联图谱(跨源 entity + relations)
 - **模块演进时序分析原语**:`github_subdir_timeline_slice`(子模块拆分时序切片) + `github_maintenance_attribution`(维护链路归因),还原 Linux 内核等大仓库的维护流水线
 - **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
+- **定向知识雷达 (Focus)** 🌐:给一个种子实体,自动发现相关性邻居、计算加权分数、按相关性剪枝、以状态机控制蔓延节奏,实现"你给个方向,它自己找到相关的东西并持续跟踪"
 
 ## 认知模型演进：从「知识超级合成器」到「主动知识探险家」
 
@@ -121,6 +122,7 @@ From Serial → Parallel Inference
 │  + github_maintenance_attribution  (原语B:维护链路归因)          │
 │  + github_fetch_repo_detail / github_fetch_relation_network     │
 │  + github_search_index / github_ingest_*                        │
+│  + focus_* (9) / entity_* (1)     (定向知识雷达)                 │
 └────────────────┬───────────────────────────────────────────────────────┘
                  │
    ┌─────────────┼─────────────┬─────────────┬─────────────┐
@@ -204,9 +206,11 @@ From Serial → Parallel Inference
 | Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` | — | — |
 | Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` | — | — |
 
-## 统一 SQLite 缓存层(WAL + 5 张表)
+## 统一 SQLite 缓存层(WAL + 14 张表)
 
 ### 表结构
+
+#### 核心缓存表 (8 张)
 
 | 表 | 作用 |
 |---|---|
@@ -218,6 +222,17 @@ From Serial → Parallel Inference
 | `sources` | 数据源注册表(reliability / avg_latency / consecutive_failures / enabled) |
 | `source_fusion` | 字段级融合存储(entity_id + source_id + field_name + value + weight) |
 | `fallback_policies` | 降级策略(entity_type + fallback_chain + stale_ttl_hours) |
+
+#### 定向知识雷达表 (6 张)
+
+| 表 | 作用 | 关键列 |
+|---|---|---|
+| `focuses` | 关注域定义(用户画像,seed + keywords + exclude + max_depth) | `id TEXT PK` / `status` / `relevance_threshold` |
+| `focus_members` | 实体-关注域关联 + 蔓延状态机 | `(focus_id, entity_id) PK` / `sprawl_status`(seed/active/boundary/pruned/exhausted) / `depth` / `relevance` |
+| `attributes` | **属性级增量存储**(多源可重复,蔓延的核心存储) | `entity_id` + `key` + `value(JSON)` + `source` + `confidence` |
+| `gaps` | 缺口表(蔓延调度的"待办清单") | `entity_id` + `missing_key` + `priority DESC` + `fetch_plan` |
+| `extraction_jobs` | 小模型提取任务记录 | `job_type`(extract_attr/extract_rel/verify/merge) + `status` + `result(JSON)` |
+| `track_schedules` | 自适应跟踪计划(exhausted 节点转 RSS 类跟踪) | `track_type`(new_citations/new_commits/...) + `interval_hours`(自适应调整) |
 
 ### 缓存读写流程
 
@@ -437,6 +452,265 @@ Kiwix 本地服务器通过以下方式之一指定(优先级同代理设置):
 
 未配置时,`kiwix_local` 源自动跳过(不启用 Wiki 工具),回退到优先级 2 及以下源。
 
+## 定向知识雷达 (Focus) 🌐
+
+**不是通用知识图谱,是定向知识雷达。** 给一个种子实体(论文 / 项目 / 人 / 概念),划定关注范围,然后在这个范围内持续深耕、自动跟踪、逐步补全。类似 RSS 但每一条订阅都会自己长出新的相关订阅。
+
+### 核心抽象:关注域 (Focus)
+
+整个系统围绕一个或多个 **Focus** 运转。每个 Focus 是一个结构化的关注画像,不是简单的关键词:
+
+```json
+{
+  "id": "f_abc123",
+  "name": "llama.cpp 生态跟踪",
+  "description": "跟踪 llama.cpp 及其周边推理引擎、量化技术、硬件适配的最新进展",
+  "seed_entities": ["project:ggerganov/llama.cpp", "person:Georgi Gerganov"],
+  "keywords": ["llama.cpp", "GGUF", "推理引擎", "量化", "GGML"],
+  "exclude_words": ["宠物", "烹饪", "游戏攻略"],
+  "max_depth": 3,
+  "relevance_threshold": 0.55,
+  "max_nodes": 500,
+  "status": "active",
+  "created_at": 1788415957
+}
+```
+
+### 蔓延状态机
+
+每个实体在 Focus 中有一个 `sprawl_status`,这是定向蔓延的核心控制:
+
+| 状态 | 含义 | 行为 |
+|---|---|---|
+| `seed` | 种子节点 | 始终扩展,不受任何限制 |
+| `active` | 在范围内且相关性高 | 每轮优先扩展其邻居 |
+| `boundary` | 相关性刚过阈值或到达 max_depth | **只记录属性,不向外扩展**(防止跑题) |
+| `pruned` | 低于阈值或命中 exclude_words | 只存基本信息,不再抓取 |
+| `exhausted` | 连续 3 轮未发现新邻居 | 转入"定期跟踪"模式(类 RSS) |
+
+`boundary` 状态特别重要——它不是扔掉,是"存下来但不往外扩"。这样如果以后某个 boundary 节点被多个 active 节点间接引用,可以升级为 active。
+
+### 定向蔓延算法
+
+不是 BFS(所有邻居平等扩展),而是**加权优先级蔓延 + 相关性剪枝**:
+
+```
+每轮调度(每 10 分钟)对每个 active focus 执行:
+
+┌──────────────────────────────────────────────────────────┐
+│ 1. 选节点                                                │
+│    从 focus_members 中取 sprawl_status='active'          │
+│    按 relevance × (1 / check_count) 排序,取 TOP 5       │
+│    (相关性高且很久没查的优先)                              │
+│                                                          │
+│ 2. 对每个选中节点,发现邻居                               │
+│    根据节点类型选择发现策略:                              │
+│    - paper  → cites + cited_by + authors.other_papers    │
+│    - project→ deps + used_by + author.other_projects     │
+│    - person → recent_papers + participated_projects      │
+│    调用现有 71 个检索工具做定向查询                        │
+│                                                          │
+│ 3. 对每个候选实体,算相关性分数                            │
+│    relevance = 0.4 × keyword_overlap                     │
+│              + 0.3 × relation_type_weight               │
+│              + 0.2 × source_trust                        │
+│              × depth_decay^depth   (每跳衰减 15%)        │
+│                                                          │
+│ 4. 分类入队                                             │
+│    relevance ≥ threshold 且 depth < max_depth → active   │
+│    relevance ≥ threshold 且 depth ≥ max_depth → boundary │
+│    relevance < threshold → boundary(只记不扩)            │
+│    命中 exclude_words → pruned                           │
+│    节点数达 max_nodes → 新节点只入 boundary              │
+│                                                          │
+│ 5. 属性提取(窄操作)                                     │
+│    对本轮新发现 + 选中的 active 节点:                    │
+│    extract_attribute(key×1-2) → attributes 表            │
+│    merge_attributes → 多源融合提升置信度                  │
+│                                                          │
+│ 6. 更新状态                                             │
+│    check_count++, last_checked=now                       │
+│    连续 3 轮无新邻居 → exhausted → 转入跟踪模式            │
+└──────────────────────────────────────────────────────────┘
+```
+
+**核心约束:深度衰减 + 相关性阈值双重过滤**,保证蔓延不会跑题。比如种子是"Transformer 论文"→ 作者论文(还在范围内)→ 作者的个人博客文章(boundary)→ 博客里的菜谱(pruned)。
+
+### 类 RSS 的持续跟踪机制
+
+`exhausted` 节点不是结束,而是从"蔓延模式"切换到"跟踪模式"。每个节点有自己自适应的更新检查节奏:
+
+```
+初始 interval = 24 小时
+
+每次检查:
+  发现新内容 → interval = max(interval × 0.7, 6h)     (活跃源,缩短间隔)
+  连续 3 次空 → interval = min(interval × 1.5, 168h)  (沉寂源,拉长到一周)
+  连续 10 次空 → 暂停跟踪,标记为 dormant
+```
+
+这比 RSS 聪明:RSS 是固定间隔轮询,不管有没有更新。这个是**活跃的源查得勤,沉寂的源查得疏**,省 API 配额和算力。跟踪触发的新内容自动走一遍蔓延算法(新引用论文 → 算相关性 → 入队 → 提取属性),知识库会自己长大。
+
+### 与 RSS 的本质区别
+
+| 维度 | RSS | 定向知识雷达 Focus |
+|---|---|---|
+| 订阅单元 | URL / Feed | **实体**(论文 / 项目 / 人 / 概念) |
+| 发现新内容 | 被动等 Feed 更新 | **主动发现**引用 / 依赖 / 作者的新内容 |
+| 范围控制 | 用户手动加 / 删订阅 | **相关性算法自动扩 / 剪** |
+| 更新频率 | 固定间隔 | **自适应间隔**(活跃源勤查) |
+| 内容结构 | 原始文章 HTML | **结构化属性 + 关系 + 置信度** |
+| 去重 | 按 URL | 按实体哈希 + 属性合并 |
+| 跨源关联 | 无(每个 Feed 孤立) | **有**(论文 ↔ 代码 ↔ 作者 ↔ 讨论串在一起) |
+| 搜索能力 | 只能看已订阅的 | **主动搜索**范围内的新实体 |
+
+一句话:RSS 是"你订什么就看什么",这个是"你给个方向,它自己找到相关的东西并持续跟踪"。
+
+### 使用示例
+
+#### 第 1 步:创建关注域
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"focus_create","arguments":{"name":"llama.cpp 生态跟踪","description":"跟踪 llama.cpp 及其周边推理引擎、量化技术、硬件适配的最新进展","seed_queries":["llama.cpp ggerganov"],"keywords":["llama.cpp","GGUF","GGML","推理引擎","量化"],"max_depth":3,"relevance_threshold":0.55,"max_nodes":500}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+$r.result.content[0].text
+```
+
+返回:
+```json
+{
+  "focus_id": "f_abc123",
+  "name": "llama.cpp 生态跟踪",
+  "seed_count": 2,
+  "status": "active",
+  "message": "focus created, 2 seed entities registered"
+}
+```
+
+#### 第 2 步:查看蔓延状态
+
+```powershell
+# 统计看板
+$body = '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"focus_stats","arguments":{"focus_id":"f_abc123"}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+$r.result.content[0].text
+```
+
+返回:
+```json
+{
+  "focus_id": "f_abc123",
+  "total_members": 15,
+  "by_status": {"seed": 2, "active": 8, "boundary": 4, "pruned": 1, "exhausted": 0},
+  "total_attributes": 42,
+  "total_relations": 18,
+  "avg_relevance": 0.73,
+  "gaps_pending": 23,
+  "track_schedules": 0
+}
+```
+
+#### 第 3 步:人工干预(剪枝跑题节点 + 提升相关节点)
+
+```powershell
+# 剪枝:某个 boundary 节点被发现是无关的
+$body = '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"focus_prune","arguments":{"focus_id":"f_abc123","entity_id":"project:pydantic/pydantic","reason":"Python 数据验证库,与推理引擎无关"}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+
+# 提升:某个 boundary 节点被用户确认为核心相关
+$body = '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"focus_promote","arguments":{"focus_id":"f_abc123","entity_id":"project:ggml-org/ggml"}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+```
+
+#### 第 4 步:查询实体属性增量(属性级蔓延结果)
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"entity_attrs","arguments":{"entity_id":"project:ggerganov/llama.cpp"}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+$r.result.content[0].text
+```
+
+返回(属性级多源增量存储,每一条属性带来源和置信度):
+```json
+{
+  "entity_id": "project:ggerganov/llama.cpp",
+  "attributes": [
+    {"key": "stars", "value": "62000", "source": "github_api", "confidence": 0.95},
+    {"key": "description", "value": "LLaMA.cpp: Port of Facebook's LLaMA model in C/C++", "source": "github_api", "confidence": 0.9},
+    {"key": "default_branch", "value": "master", "source": "github_api", "confidence": 0.98},
+    {"key": "latest_release", "value": "b3960", "source": "github_api", "confidence": 0.88},
+    {"key": "license", "value": "MIT", "source": "github_api", "confidence": 0.95}
+  ],
+  "total_attrs": 5,
+  "sources_seen": ["github_api"]
+}
+```
+
+#### 第 5 步:查询缺口(下一轮该补什么)
+
+```powershell
+$body = '{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"focus_gaps","arguments":{"focus_id":"f_abc123","limit":10}}}'
+$r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
+$r.result.content[0].text
+```
+
+返回:
+```json
+{
+  "gaps": [
+    {"entity_id": "project:ggerganov/llama.cpp", "missing_key": "contributors", "priority": 0.9, "reason": "never_extracted", "fetch_plan": "github_get_contributors"},
+    {"entity_id": "project:ggerganov/llama.cpp", "missing_key": "open_issues", "priority": 0.7, "reason": "low_confidence", "fetch_plan": "github_get_issues"},
+    {"entity_id": "person:Georgi Gerganov", "missing_key": "recent_projects", "priority": 0.6, "reason": "never_extracted", "fetch_plan": "github_search_users"}
+  ],
+  "total": 23
+}
+```
+
+### 一个完整的蔓延例子(时间线)
+
+以种子实体 "ggerganov/llama.cpp" 为例,看它如何自动蔓延:
+
+```
+第 1 轮(刚创建):
+  → 种子 llama.cpp 注册为 sprawl_status=seed,depth=0
+  → keywords=["llama.cpp","GGUF","GGML","推理引擎","量化"]
+  → gaps 生成:missing [contributors, open_issues, releases, dependencies]
+
+第 2 轮(10 分钟后):
+  → 处理 seed 节点,发现邻居:
+    {project: ggml}          relevance=0.92 active   depth=1
+    {project: llama-cpp-python}  relevance=0.88 active   depth=1
+    {person: 5 contributors}   relevance=0.60 boundary depth=1
+  → 提取属性: llama.cpp 的 stars(62000), description, latest_release
+  → gaps 为新节点生成: ggml missing [description, stars, dependencies]
+
+第 5 轮:
+  → 蔓延到 llama-cpp-python → 发现它依赖 pydantic
+  → pydantic relevance=0.35(跟推理引擎关系远)→ boundary,只记不扩
+  → 不会蔓延到 pydantic 的依赖(防止跑到 Python 生态汪洋大海)
+
+第 20 轮(~3 小时后):
+  → llama.cpp 连续 3 轮没发现新依赖 → exhausted
+  → 自动创建 track_schedule: track_type=new_commits+new_releases, interval=6h
+  → ggml exhausted → track, interval=12h
+  → llama-cpp-python 还在 active(周边 Python 封装更新频繁)
+
+一周后:
+  → 跟踪模式发现 llama.cpp 有新 release "b4000"
+  → release notes 提到"新硬件后端 Vulkan"
+  → 新实体 {concept: Vulkan 推理后端} relevance=0.7 → active → 开始蔓延
+  → 自动发现其他支持 Vulkan 的推理引擎项目 → 入队
+  → 用户随时可以 focus_stats / focus_gaps 查看整体蔓延进度
+```
+
+### 设计原则总结
+
+核心就三句话:
+
+1. **属性级别的增量存储** — `attributes` 表不是"一个实体一条记录",而是"一个属性一条记录,多源可重复",让信息可以一条一条地补
+2. **窄操作提取** — 一次一个属性,强制 JSON,失败重试,让小模型也能可靠贡献(已有 71 个检索工具直接当"发现邻居的手"来用)
+3. **缺口驱动的定向调度** — `gaps` 表 + 状态机 + 自适应间隔,让抓取有方向地蔓延,而不是盲目重复
+
 ## 二进制程序下载(无需自行编译)
 
 打 tag 推送后,GitHub Actions 云端自动编译并发布到 Release。直接下载即用,静态链接 MSVC CRT,纯净 Windows 10/11 x64 机器无需另装 VC++ 运行库。
@@ -592,7 +866,7 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 $body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 $r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
 "tools count: $($r.result.tools.Count)"
-# → tools count: 71
+# → tools count: 81
 ```
 
 ### arXiv 论文详情(支持 cache_hit)
@@ -706,7 +980,7 @@ $r.result.content[0].text
 
 失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
 
-## 工具列表(71 个)
+## 工具列表(81 个)
 
 ### GitHub(18 个)
 
@@ -827,6 +1101,40 @@ $r.result.content[0].text
 | `wiki_read` | 读取指定维基条目的完整正文(从 Kiwix 本地 ZIM 解析,零网络延迟,支持 TOC / section 提取) |
 | `wiki_scan` | 批量扫描维基分类 / 索引页,枚举属于某主题的所有条目列表(分页遍历) |
 
+### 定向知识雷达 Focus (10 个)
+
+围绕 **Focus(关注域)** 这个核心抽象,实现"给个方向 → 自动蔓延 → 持续跟踪"。
+
+#### Focus 管理 (4 个)
+
+| 工具 | 说明 |
+|---|---|
+| `focus_create` | 创建关注域。输入 name + seed_entity_ids 或 seed_queries + keywords,自动创建 focuses 表记录并注册种子实体为 `sprawl_status=seed` |
+| `focus_list` | 列出所有关注域,含节点数、平均相关性、最新检查时间 |
+| `focus_get` | 查询单个关注域详情(含 seeds / keywords / exclude / 配置参数) |
+| `focus_delete` | 删除关注域。`keep_entities=true`(默认)保留已收集的实体和属性数据 |
+
+#### 蔓延控制与查询 (3 个)
+
+| 工具 | 说明 |
+|---|---|
+| `focus_members` | 查询关注域成员实体列表,可按 `sprawl_status` 过滤(seed/active/boundary/pruned/exhausted),默认 limit=100 |
+| `focus_gaps` | 查询缺口待办列表,按 priority 降序返回未解决的属性缺口(用于定向调度下一轮抓取) |
+| `focus_stats` | 返回蔓延统计看板:entities 总数 / attributes 总数 / relations 总数 / 平均 completeness / 各 sprawl_status 计数 |
+
+#### 实体属性查询 (1 个)
+
+| 工具 | 说明 |
+|---|---|
+| `entity_attrs` | 查询单个实体的所有属性,支持按 attr_key 过滤。返回多源属性值 + 置信度 + 来源 |
+
+#### 人工干预 (2 个)
+
+| 工具 | 说明 |
+|---|---|
+| `focus_prune` | 人工剪枝。把某个 `active`/`boundary` 节点降为 `pruned`(用户觉得跑题了),后续不再扩展 |
+| `focus_promote` | 人工提升。把某个 `boundary` 节点升为 `active`(用户觉得相关),允许它向外扩展邻居 |
+
 ## 客户端配置
 
 ### Claude Desktop / TRAE
@@ -866,7 +1174,7 @@ llama-server.exe ^
   --mcp http://127.0.0.1:8765/mcp
 ```
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 71 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 81 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
 
 ## 协议兼容性
 
@@ -878,7 +1186,7 @@ llama-server.exe ^
 | 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
 | CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
 | OPTIONS 预检 | ✅ | 自动返回 200 |
-| `tools/list` | ✅ | 71 个工具(9 源) |
+| `tools/list` | ✅ | 81 个工具(9 源 + Focus) |
 | `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
 | `ping` | ✅ | 心跳保活 |
 | `shutdown` | ✅ | 触发 server 优雅停止 |
@@ -996,7 +1304,7 @@ cmake --build build --config Release --target test_smoke
 
 | 验证项 | 期望结果 |
 |---|---|
-| `tools/list` 返回工具数 | 65 |
+| `tools/list` 返回工具数 | 81 |
 | `arxiv_fetch_paper_detail` 首次调用 | 返回论文详情(无 `cache_hit` 字段) |
 | `arxiv_fetch_paper_detail` 二次调用 | `cache_hit=true` + `cache_expires_at` 时间戳 |
 | `hn_fetch_detailed_story` 返回 `source_url=arxiv.org` | 自动建立 `story -[mentions]-> paper` 跨源关系 |
@@ -1012,7 +1320,7 @@ cmake --build build --config Release --target test_smoke
 | 浏览器指纹 | 无 | 完整(与 Edge 一致) |
 | 反爬能力 | 弱 | 强(真实浏览器) |
 | 数据源 | GitHub 单源 | 9 源统一接入 |
-| 缓存层 | 无 | SQLite WAL + 5 张表 + 188 项烟雾测试 |
+| 缓存层 | 无 | SQLite WAL + 14 张表 + 188 项烟雾测试 |
 | 多源融合 | 无 | 字段级 UNION/LATEST 策略 + 熔断器 + 降级链 |
 | 关系图谱 | 无 | Entity Mapper + 跨源 mentions 自动建立 |
 | 三层观测 | 无 | L1 概览 / L2 单点深挖 / L3 关联图谱 |
@@ -1191,6 +1499,21 @@ llama.cpp 通过 `--mcp http://host:port/mcp` 挂载后,LLM 可直接识别语�
                max_depth=2, max_pages=15)
 ```
 
+### 定向知识雷达 Focus (10 个模板)
+
+| 语义模板 | 对应 MCP 工具 |
+|---|---|
+| `<创建一个叫 <name> 的关注域,种子是 <seed_queries>,关注关键词 <keywords>>` | `focus_create` |
+| `<列出所有关注域及蔓延状态>` | `focus_list` |
+| `<查看关注域 <focus_id> 的详情>` | `focus_get` |
+| `<删除关注域 <focus_id>,<keep_entities>>` | `focus_delete` |
+| `<查看关注域 <focus_id> 的成员实体,状态 <sprawl_status>>` | `focus_members` |
+| `<查看关注域 <focus_id> 的缺口待办,优先级 >= <min_priority>>` | `focus_gaps` |
+| `<查看关注域 <focus_id> 的蔓延统计>` | `focus_stats` |
+| `<查看实体 <entity_id> 的所有属性>` | `entity_attrs` |
+| `<在关注域 <focus_id> 中剪枝实体 <entity_id>,原因 <reason>>` | `focus_prune` |
+| `<在关注域 <focus_id> 中提升实体 <entity_id> 为 active>` | `focus_promote` |
+
 ### llama.cpp server 集成示例
 
 ```powershell
@@ -1275,8 +1598,8 @@ llama-server.exe ^
 | 验证项 | 结果 | 说明 |
 |---|---|---|
 | GET `/` | ✅ | 返回 9 源状态(GitHub=true,其余需 --xxx-profile) |
-| GET `/tools` | ✅ | 返回 71 个工具(完整列表) |
-| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 71 个工具,JSON-RPC id=1 正确匹配 |
+| GET `/tools` | ✅ | 返回 81 个工具(完整列表) |
+| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 81 个工具,JSON-RPC id=1 正确匹配 |
 | 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
 | 完整 9 源 fetch 回调 | ✅ | 9 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
 | `github_module_timeline_analysis` ingest_first=false | ✅ | timeline_count=3 (research-mcp 仓库 src/tools.cpp) |
