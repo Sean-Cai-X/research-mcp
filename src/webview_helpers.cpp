@@ -91,13 +91,16 @@ json NavigateAndExecuteRaw(WebViewSession& session,
 
     HRESULT navRes = session.WaitForNavigation(navTimeoutMs);
     if (FAILED(navRes)) {
-        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms WaitForNavigation TIMEOUT/FAIL, still attempt read" << std::endl;
-    } else {
-        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms WaitForNavigation OK" << std::endl;
-        if (waitMs > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
-            std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms sleep(" << waitMs << ") done" << std::endl;
-        }
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms()
+                  << "ms WaitForNavigation FAILED (hr=0x" << std::hex << navRes
+                  << "), page may be incomplete - returning null to avoid false-positive empty results"
+                  << std::endl;
+        return nullptr;
+    }
+    std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms WaitForNavigation OK" << std::endl;
+    if (waitMs > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms sleep(" << waitMs << ") done" << std::endl;
     }
 
     std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms calling ExecuteScript" << std::endl;

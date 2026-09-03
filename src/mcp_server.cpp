@@ -508,24 +508,45 @@ json McpServer::dispatch_arxiv_tool(const std::string& tool_name, const json& ar
     };
 }
 
-// ============ Hacker News 工具分发(7 个 hn_* 工具: 5 原始 + 2 分层) ============
+// ============ Hacker News 工具分发(7 个 hn_* 工具) ============
+// 索引类工具(top/new/best/latest_index): 纯 Firebase REST,不需要 WebView2
+// 深度类工具(item/search/fetch_detailed): 需要 WebView2(导航 HN 页面/外部文章)
 json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args) {
     DBG_LOG("hn") << "dispatch_hn_tool: tool=" << tool_name << " args=" << args.dump().substr(0, 200);
+
+    // ---- 索引类: 纯 Firebase,不需要 hn_session_ ----
+    // fetch_stories_with_fallback 内部:
+    //   1. Firebase API 优先(纯 curl,不需要 WebView2)
+    //   2. WebView2 兜底(仅当 session.IsReady() 时才尝试)
+    // 所以即使没有 --hn-profile,索引工具也能正常工作
+    if (tool_name == "hn_get_top_stories" ||
+        tool_name == "hn_get_new_stories" ||
+        tool_name == "hn_get_best_stories" ||
+        tool_name == "hn_get_latest_index") {
+        try {
+            static WebViewSession dummy_session;  // 未 Init,IsReady()=false
+            WebViewSession& sess = hn_session_ ? *hn_session_ : dummy_session;
+            if (tool_name == "hn_get_top_stories")      return ToolHnGetTopStories(sess, args);
+            if (tool_name == "hn_get_new_stories")      return ToolHnGetNewStories(sess, args);
+            if (tool_name == "hn_get_best_stories")     return ToolHnGetBestStories(sess, args);
+            if (tool_name == "hn_get_latest_index")     return ToolHnGetLatestIndex(sess, args);
+        } catch (const std::exception& e) {
+            DBG_LOG("hn") << "dispatch_hn_tool (index): exception: " << e.what();
+            return McpError(std::string("ERROR: hn tool exception: ") + e.what());
+        }
+    }
+
+    // ---- 深度类: 必须有 WebView2 ----
     if (!ensure_hn_session()) {
-        DBG_LOG("hn") << "dispatch_hn_tool: ensure_hn_session failed";
+        DBG_LOG("hn") << "dispatch_hn_tool: ensure_hn_session failed for deep tool";
         return McpError("ERROR: HackerNews session not initialized. Start with --hn-profile <DIR>.");
     }
-    DBG_LOG("hn") << "dispatch_hn_tool: session ready, dispatching ...";
     try {
-        if (tool_name == "hn_get_top_stories")       { DBG_LOG("hn") << "calling ToolHnGetTopStories"; auto r = ToolHnGetTopStories(*hn_session_, args); DBG_LOG("hn") << "ToolHnGetTopStories done, result size=" << r.dump().size(); return r; }
-        if (tool_name == "hn_get_new_stories")       return ToolHnGetNewStories(*hn_session_, args);
-        if (tool_name == "hn_get_best_stories")      return ToolHnGetBestStories(*hn_session_, args);
         if (tool_name == "hn_get_item")              return ToolHnGetItem(*hn_session_, args);
         if (tool_name == "hn_search_by_keyword")     return ToolHnSearchByKeyword(*hn_session_, args);
-        if (tool_name == "hn_get_latest_index")      return ToolHnGetLatestIndex(*hn_session_, args);
         if (tool_name == "hn_fetch_detailed_story")  return ToolHnFetchDetailedStory(*hn_session_, args);
     } catch (const std::exception& e) {
-        DBG_LOG("hn") << "dispatch_hn_tool: exception: " << e.what();
+        DBG_LOG("hn") << "dispatch_hn_tool (deep): exception: " << e.what();
         return McpError(std::string("ERROR: hn tool exception: ") + e.what());
     }
     DBG_LOG("hn") << "dispatch_hn_tool: unknown tool: " << tool_name;

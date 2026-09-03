@@ -2,8 +2,10 @@
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/cache_manager.hpp"
+#include "github_research/hn_firebase.hpp"
 #include <iostream>
 #include <string>
+#include <ctime>
 
 namespace github_research {
 
@@ -11,7 +13,6 @@ namespace github_research {
 // 内置 JS 脚本
 // ============================================================
 // 设计理念:工具只负责"取到页面内容",解析交给 AI
-// 5 个原始工具统一使用 webview_helpers.hpp 中的 kJsExtractRawPage
 // 2 个分层工具使用专用结构化 JS(返回 JSON 数组/对象)
 
 namespace {
@@ -137,6 +138,102 @@ constexpr const char* kJsHnItemDetail = R"(
 } // anonymous namespace
 
 // ============================================================
+// Firebase → 工具输出格式 转换层
+// ============================================================
+// Firebase item JSON 字段名与 WebView2+JS 解析输出不同,
+// 这里统一成工具对外的标准字段,保持向后兼容。
+static json convert_firebase_item_to_story(const json& fb_item, int rank) {
+    json story;
+    int id = fb_item.value("id", 0);
+    story["hn_id"] = std::to_string(id);
+    story["rank"] = rank;
+    story["title"] = fb_item.value("title", "");
+
+    std::string url = fb_item.value("url", "");
+    story["external_url"] = url;
+
+    story["score"] = fb_item.value("score", 0);
+    story["author"] = fb_item.value("by", "");
+
+    if (fb_item.contains("time") && fb_item["time"].is_number_integer()) {
+        auto now = std::time(nullptr);
+        auto t = static_cast<std::time_t>(fb_item["time"].get<int64_t>());
+        auto diff_sec = static_cast<long>(now - t);
+        std::string age_str;
+        if (diff_sec < 0) age_str = "unknown";
+        else if (diff_sec < 60) age_str = std::to_string(diff_sec) + " seconds ago";
+        else if (diff_sec < 3600) age_str = std::to_string(diff_sec / 60) + " minutes ago";
+        else if (diff_sec < 86400) age_str = std::to_string(diff_sec / 3600) + " hours ago";
+        else age_str = std::to_string(diff_sec / 86400) + " days ago";
+        story["created_min_ago"] = age_str;
+    } else {
+        story["created_min_ago"] = "";
+    }
+
+    story["comment_count"] = fb_item.value("descendants", 0);
+    story["hn_item_url"] = "item?id=" + std::to_string(id);
+    return story;
+}
+
+// Firebase 优先 + WebView2 兜底
+static json fetch_stories_with_fallback(
+    WebViewSession& session, const std::string& source, int count) {
+
+    std::cerr << "[hn] attempting Firebase API first (source=" << source << ")" << std::endl;
+    json ids;
+    if (source == "new")           ids = HnFirebase::get_new_ids();
+    else if (source == "best")     ids = HnFirebase::get_best_ids();
+    else                           ids = HnFirebase::get_top_ids();
+
+    if (ids.is_array() && !ids.empty()) {
+        std::vector<int> id_list;
+        id_list.reserve(std::min((int)ids.size(), count));
+        for (auto& v : ids) {
+            if ((int)id_list.size() >= count) break;
+            if (v.is_number_integer()) id_list.push_back(v.get<int>());
+        }
+
+        auto items = HnFirebase::get_items_batch(id_list);
+
+        json stories = json::array();
+        int rank = 0;
+        for (int id : id_list) {
+            rank++;
+            auto it = items.find(id);
+            if (it != items.end() && it->second.is_object()) {
+                bool dead = it->second.value("dead", false);
+                bool del = it->second.value("deleted", false);
+                if (dead || del) continue;
+                stories.push_back(convert_firebase_item_to_story(it->second, rank));
+            }
+        }
+
+        std::cerr << "[hn] Firebase API OK: got " << stories.size()
+                  << " stories for source=" << source << std::endl;
+        return stories;
+    }
+
+    // 兜底 WebView2(仅当 session 已初始化时)
+    if (session.IsReady()) {
+        std::cerr << "[hn] Firebase API failed/empty, falling back to WebView2 scrape" << std::endl;
+        std::wstring url;
+        if (source == "new")           url = L"https://news.ycombinator.com/newest";
+        else if (source == "best")     url = L"https://news.ycombinator.com/best";
+        else                           url = L"https://news.ycombinator.com/";
+
+        json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 4000, 45000);
+        if (raw.is_array()) return raw;
+        if (raw.is_string()) {
+            try { return json::parse(raw.get<std::string>()); }
+            catch (...) {}
+        }
+    } else {
+        std::cerr << "[hn] Firebase API failed and WebView2 session not ready, no fallback available" << std::endl;
+    }
+    return json::array();
+}
+
+// ============================================================
 // 工具实现
 // ============================================================
 
@@ -149,28 +246,17 @@ json ToolHnGetTopStories(WebViewSession& session, const json& args) {
     if (count < 1) count = 1;
     if (count > 100) count = 100;
 
-    std::wstring url = L"https://news.ycombinator.com/";
-    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
+    json stories = fetch_stories_with_fallback(session, "top", count);
 
-    json stories = json::array();
-    if (raw.is_string()) {
-        try {
-            stories = json::parse(raw.get<std::string>());
-        } catch (...) {
-            return McpError("ERROR: [hn] failed to parse top stories JSON");
-        }
-    } else if (raw.is_array()) {
-        stories = raw;
-    } else {
-        return McpError("ERROR: [hn] failed to fetch top stories");
+    if (stories.empty()) {
+        return McpError("ERROR: [hn] failed to fetch top stories (Firebase API + WebView2 both failed)");
     }
 
-    // 按 count 截断
+    // 按 count 截断(Firebase 返回最多 500,WebView2 返回 ~30)
     if ((int)stories.size() > count) {
         json trimmed = json::array();
-        int idx = 0;
-        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
-            trimmed.push_back(*it);
+        for (int i = 0; i < count && i < (int)stories.size(); ++i) {
+            trimmed.push_back(stories[i]);
         }
         stories = std::move(trimmed);
     }
@@ -193,27 +279,16 @@ json ToolHnGetNewStories(WebViewSession& session, const json& args) {
     if (count < 1) count = 1;
     if (count > 100) count = 100;
 
-    std::wstring url = L"https://news.ycombinator.com/newest";
-    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
+    json stories = fetch_stories_with_fallback(session, "new", count);
 
-    json stories = json::array();
-    if (raw.is_string()) {
-        try {
-            stories = json::parse(raw.get<std::string>());
-        } catch (...) {
-            return McpError("ERROR: [hn] failed to parse new stories JSON");
-        }
-    } else if (raw.is_array()) {
-        stories = raw;
-    } else {
-        return McpError("ERROR: [hn] failed to fetch new stories");
+    if (stories.empty()) {
+        return McpError("ERROR: [hn] failed to fetch new stories (Firebase API + WebView2 both failed)");
     }
 
     if ((int)stories.size() > count) {
         json trimmed = json::array();
-        int idx = 0;
-        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
-            trimmed.push_back(*it);
+        for (int i = 0; i < count && i < (int)stories.size(); ++i) {
+            trimmed.push_back(stories[i]);
         }
         stories = std::move(trimmed);
     }
@@ -236,27 +311,16 @@ json ToolHnGetBestStories(WebViewSession& session, const json& args) {
     if (count < 1) count = 1;
     if (count > 100) count = 100;
 
-    std::wstring url = L"https://news.ycombinator.com/best";
-    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
+    json stories = fetch_stories_with_fallback(session, "best", count);
 
-    json stories = json::array();
-    if (raw.is_string()) {
-        try {
-            stories = json::parse(raw.get<std::string>());
-        } catch (...) {
-            return McpError("ERROR: [hn] failed to parse best stories JSON");
-        }
-    } else if (raw.is_array()) {
-        stories = raw;
-    } else {
-        return McpError("ERROR: [hn] failed to fetch best stories");
+    if (stories.empty()) {
+        return McpError("ERROR: [hn] failed to fetch best stories (Firebase API + WebView2 both failed)");
     }
 
     if ((int)stories.size() > count) {
         json trimmed = json::array();
-        int idx = 0;
-        for (auto it = stories.begin(); it != stories.end() && idx < count; ++it, ++idx) {
-            trimmed.push_back(*it);
+        for (int i = 0; i < count && i < (int)stories.size(); ++i) {
+            trimmed.push_back(stories[i]);
         }
         stories = std::move(trimmed);
     }
@@ -325,8 +389,7 @@ json ToolHnSearchByKeyword(WebViewSession& session, const json& args) {
 // ============================================================
 // 6. hn_get_latest_index - 轻量索引(结构化,无深度请求)
 // ============================================================
-// 设计:只导航一次 HN 首页/newest/best,解析 tr.athing 行
-// 返回结构化数组,不抓取任何外部页面,网络请求最小化
+// Firebase API 优先,WebView2 兜底
 json ToolHnGetLatestIndex(WebViewSession& session, const json& args) {
     int limit = 30;
     if (args.contains("limit") && args["limit"].is_number_integer()) {
@@ -340,30 +403,23 @@ json ToolHnGetLatestIndex(WebViewSession& session, const json& args) {
         source = args["source"].get<std::string>();
     }
 
-    std::string urlStr;
-    if (source == "newest") {
-        urlStr = "https://news.ycombinator.com/newest";
-    } else if (source == "best") {
-        urlStr = "https://news.ycombinator.com/best";
-    } else {
-        urlStr = "https://news.ycombinator.com/";
-    }
-    std::wstring url = to_wstring(urlStr);
+    // source → Firebase fetch_stories_with_fallback 的类型名
+    std::string fb_type = "top";  // front/top → topstories
+    if (source == "newest") fb_type = "new";
+    else if (source == "best") fb_type = "best";
 
-    json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 2000, 30000);
-    if (raw.is_null()) {
-        return McpError("ERROR: [hn] index extraction failed (navigation or JS error)");
+    json stories = fetch_stories_with_fallback(session, fb_type, limit);
+
+    if (stories.empty()) {
+        return McpError("ERROR: [hn] index extraction failed (Firebase API + WebView2 both failed)");
     }
 
-    // raw 是结构化数组,按 limit 截断
     json items = json::array();
-    if (raw.is_array()) {
-        int n = 0;
-        for (auto& it : raw) {
-            if (n >= limit) break;
-            items.push_back(it);
-            ++n;
-        }
+    int n = 0;
+    for (auto& it : stories) {
+        if (n >= limit) break;
+        items.push_back(it);
+        ++n;
     }
 
     json payload = {
