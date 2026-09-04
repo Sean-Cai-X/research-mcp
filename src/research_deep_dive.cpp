@@ -264,7 +264,7 @@ json fetch_secondary_page(WebViewSession& session,
 // ============================================================
 // 主入口
 // ============================================================
-json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
+json ToolResearchDeepDive(WebViewSession* web_session, const json& args) {
     // ── 参数解析 ──
     std::string seed_query;
     if (args.contains("seed_query") && args["seed_query"].is_string()) {
@@ -272,6 +272,23 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
     }
     if (seed_query.empty()) {
         return McpError("ERROR: [dd] 'seed_query' parameter is required");
+    }
+
+    // 模式: auto(默认) | hn | general
+    std::string mode = "auto";
+    if (args.contains("mode") && args["mode"].is_string()) {
+        mode = args["mode"].get<std::string>();
+    }
+    bool has_session = (web_session != nullptr);
+    bool hn_enabled = has_session && (mode == "hn" || mode == "auto");
+    if (mode == "hn" && !has_session) {
+        return McpError(
+            "ERROR: [dd] mode='hn' requires --hn-profile. "
+            "Use mode='general' for cross-discipline academic topics without HN dependency. "
+            "Or omit mode to let auto-detect decide.");
+    }
+    if (mode == "general" && mode != "general" && has_session == false) {
+        // general 模式不需要 WebView session
     }
     int max_links = 5;
     if (args.contains("max_secondary_links") && args["max_secondary_links"].is_number_integer()) {
@@ -322,7 +339,7 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
             hn_id = seed_query;
         }
     }
-    if (looks_hn) {
+    if (looks_hn && hn_enabled) {
         seed_type = "hn";
         json hn_args = {
             {"hn_id", hn_id},
@@ -332,7 +349,7 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
             {"max_comment_count", 120},
             {"text_max_chars", 30000}
         };
-        seed_payload = ToolHnFetchDetailedStory(hn_session, hn_args);
+        seed_payload = ToolHnFetchDetailedStory((*web_session), hn_args);
         // Tool 返回格式是 WrapMcpResult: {content:[{type:"text",text:"..."}]}
         // 解包出实际 payload(由 caller 的 MCP 包装一致性决定)
         // 这里解到 payload 层即可: 如果有 content[0].text 且是 JSON 字符串则 parse
@@ -382,12 +399,12 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
     // 当 seed_type=keyword 且既无 HN 前缀命中、也无实体缓存匹配时,
     // 从 HN 首页拉取热门故事,按关键词重叠度打分,取 TOP 若干条深度抓取,
     // 再进入后续 URL 聚合 + 图谱遍历链路,避免直接返回空结果.
-    if (seed_type == "keyword" && url_scores.empty() && start_entities.empty()) {
+    if (seed_type == "keyword" && hn_enabled && url_scores.empty() && start_entities.empty()) {
         auto keywords = split_keywords(seed_query);
 
         // 1) 拉取 HN 前 20 条故事索引
         json top_args = {{"count", 20}};
-        json top_wrapped = ToolHnGetTopStories(hn_session, top_args);
+        json top_wrapped = ToolHnGetTopStories((*web_session), top_args);
         json top_payload = unwrap_mcp_content(top_wrapped);
         json top_stories = json::array();
         if (top_payload.is_object() && top_payload.contains("stories") &&
@@ -429,7 +446,7 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
                     {"max_comment_count", 60},
                     {"text_max_chars", 20000}
                 };
-                json detail_wrapped = ToolHnFetchDetailedStory(hn_session, detail_args);
+                json detail_wrapped = ToolHnFetchDetailedStory((*web_session), detail_args);
                 json detail_payload = unwrap_mcp_content(detail_wrapped);
                 if (!detail_payload.is_object()) continue;
                 collect_urls_from_hn(detail_payload, url_scores, url_evidence);
@@ -490,7 +507,12 @@ json ToolResearchDeepDive(WebViewSession& hn_session, const json& args) {
     int page_idx = 0;
     for (auto& [u, score, ev] : ranked) {
         auto pg_start = std::chrono::steady_clock::now();
-        json pg = fetch_secondary_page(hn_session, u, page_text_max, force_refresh);
+        json pg = json::object();
+        if (web_session) {
+            pg = fetch_secondary_page((*web_session), u, page_text_max, force_refresh);
+        } else {
+            pg["status"] = "skipped_no_webview";
+        }
         pg["priority_score"] = score;
         pg["discovery_evidence"] = ev;
         pg["index"] = page_idx;

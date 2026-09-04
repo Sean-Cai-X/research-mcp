@@ -3,6 +3,7 @@
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
 #include "github_research/cache_manager.hpp"
+#include "github_research/focus_web_search.hpp"
 #include "github_research/arxiv_tools.hpp"
 #include "github_research/hackernews_tools.hpp"
 #include "github_research/research_deep_dive.hpp"
@@ -554,17 +555,44 @@ json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args)
     return McpError("ERROR: unknown hn tool: " + tool_name);
 }
 
-// ============ 跨源 DeepDive 工具 (research_* 前缀, 用 HN session + 图谱) ============
+// ============ 跨源 DeepDive 工具 (research_* 前缀, 可选 HN session) ============
 json McpServer::dispatch_research_tool(const std::string& tool_name, const json& args) {
     DBG_LOG("dd") << "dispatch_research_tool: tool=" << tool_name;
-    // research_deep_dive 用 HN session(因为 WebView 可以导航任意 URL)
-    if (!ensure_hn_session()) {
-        return McpError("ERROR: research_deep_dive requires --hn-profile <DIR> (WebView for secondary page fetching).");
+
+    // 读取 mode 参数: auto(默认) | hn | general
+    std::string mode = "auto";
+    if (args.contains("mode") && args["mode"].is_string()) {
+        mode = args["mode"].get<std::string>();
     }
+
+    // 根据 mode 决定是否需要 HN session
+    WebViewSession* usable_session = nullptr;
+    if (mode == "general") {
+        // general 模式: 不依赖 HN,可以没有 WebView session
+        // 如果有其他 WebView session(比如 arxiv),也可以传过来做页面抓取
+        // 但为了简化,general 模式默认不使用 WebView,让 deep_dive 内部跳过网页抓取
+        DBG_LOG("dd") << "mode=general: no HN session required";
+    } else {
+        // auto 或 hn: 尝试 HN session
+        if (ensure_hn_session()) {
+            usable_session = hn_session_.get();
+        } else {
+            if (mode == "hn") {
+                return McpError(
+                    "ERROR: research_deep_dive mode='hn' requires --hn-profile <DIR>. "
+                    "Use mode='general' for cross-discipline academic topics without HN dependency.");
+            }
+            // auto 模式下没有 HN session → 降级 general
+            DBG_LOG("dd") << "mode=auto but no HN session, degrading to general mode";
+        }
+    }
+
     try {
         if (tool_name == "research_deep_dive") {
-            DBG_LOG("dd") << "calling ToolResearchDeepDive";
-            auto r = ToolResearchDeepDive(*hn_session_, args);
+            DBG_LOG("dd") << "calling ToolResearchDeepDive, usable_session="
+                         << (usable_session ? "yes" : "null")
+                         << ", mode=" << mode;
+            auto r = ToolResearchDeepDive(usable_session, args);
             DBG_LOG("dd") << "ToolResearchDeepDive done, result size=" << r.dump().size();
             return r;
         }
@@ -2218,6 +2246,27 @@ json McpServer::handle_tools_list() {
                     })},
                     {"required", json::array({"focus_id"})}
                 })}
+            },
+            {
+                {"name", "system_diagnostics"},
+                {"description", "Unified diagnostic snapshot: engines, cache summary, entities, focus."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"include_cache_keys", json::object({{"type","boolean"}})}
+                    })}
+                })}
+            },
+            {
+                {"name", "system_list_cache"},
+                {"description", "List recent cache entries filtered by source_type."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"source_type", json::object({{"type","string"}})},
+                        {"limit", json::object({{"type","integer"}})}
+                    })}
+                })}
             }
         })}
     };
@@ -2249,6 +2298,31 @@ json McpServer::handle_tools_call(const json& params) {
     if (name == "web_search")           return dispatch_focus_tool(name, args);
     if (name.rfind("focus_", 0) == 0)    return dispatch_focus_tool(name, args);
     if (name.rfind("entity_", 0) == 0)   return dispatch_focus_tool(name, args);
+
+    // system_* 诊断工具 (内联实现, 直接调 CacheManager)
+    if (name.rfind("system_", 0) == 0) {
+        CacheManager& cm = CacheManager::instance();
+        if (name == "system_diagnostics") {
+            bool include_keys = args.value("include_cache_keys", true);
+            int sample_limit = include_keys ? 5 : 0;
+            json result = json::object();
+            result["cache_manager"]     = cm.stats();
+            result["cache_summary"]     = cm.get_cache_summary(sample_limit);
+            result["source_health"]     = cm.get_source_health();
+            result["engines"]           = web_search_engine_status();
+            try { result["focus_overview"] = cm.get_sprawl_stats(""); } catch (...) {}
+            return McpSuccess(result);
+        }
+        if (name == "system_list_cache") {
+            std::string st = args.value("source_type", std::string(""));
+            int lim = args.value("limit", 20);
+            if (lim < 1) lim = 1;
+            if (lim > 200) lim = 200;
+            json arr = cm.list_cache(st, lim);
+            return McpSuccess({{"count", arr.size()}, {"entries", arr}});
+        }
+        return McpError("ERROR: unknown system tool: " + name);
+    }
 
     // GitHub 工具走原路径
     return dispatch_tool_call(client_, params);

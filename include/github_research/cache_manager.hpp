@@ -235,6 +235,12 @@ public:
     // 返回各数据源健康状态
     json get_source_health();
 
+    // 按 source_type 分组的缓存统计: {source_type: {total, ok, failed, stale, key_sample[]}}
+    json get_cache_summary(int key_sample_limit = 5);
+
+    // 列出指定 source_type 下最近 N 条缓存 key (按 updated_at 降序)
+    json list_cache(const std::string& source_type = "", int limit = 20);
+
     // 强制刷新某实体(可指定数据源)
     void force_refresh_entity(const std::string& entity_id,
                                const std::string& source_id = "");

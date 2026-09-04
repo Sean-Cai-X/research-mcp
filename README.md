@@ -19,6 +19,7 @@
 - **模块演进时序分析原语**:`github_subdir_timeline_slice`(子模块拆分时序切片) + `github_maintenance_attribution`(维护链路归因),还原 Linux 内核等大仓库的维护流水线
 - **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
 - **定向知识雷达 (Focus)** 🌐:给一个种子实体,自动发现相关性邻居、计算加权分数、按相关性剪枝、以状态机控制蔓延节奏,实现"你给个方向,它自己找到相关的东西并持续跟踪"
+- **Web Search 三级降级 + 熔断器**: Bing(熔断冷却 5min) → Tavily(熔断冷却) → DuckDuckGo HTML(无 key 永远兜底) → 冻结缓存(7 天 stale)
 
 ## 认知模型演进：从「知识超级合成器」到「主动知识探险家」
 
@@ -980,7 +981,7 @@ $r.result.content[0].text
 
 失败结果写入缓存(`fetch_status=failed`,TTL=1h),短时间内重复调用直接返回失败缓存,不再重复尝试 WebView2 初始化。
 
-## 工具列表(90 个)
+## 工具列表(92 个)
 
 ### GitHub(18 个)
 
@@ -1109,7 +1110,7 @@ $r.result.content[0].text
 
 | 工具 | 说明 |
 |---|---|
-| `focus_create` | 创建关注域。输入 name + seed_entity_ids 或 seed_queries + keywords,自动创建 focuses 表记录并注册种子实体为 `sprawl_status=seed` |
+| `focus_create` | 创建关注域。seed_queries 找不到已注册实体时**自动创建 concept 类型种子**(支持"理论先行"场景,不需要预先有库内实体) |
 | `focus_list` | 列出所有关注域,含节点数、平均相关性、最新检查时间 |
 | `focus_get` | 查询单个关注域详情(含 seeds / keywords / exclude / 配置参数) |
 | `focus_delete` | 删除关注域。`keep_entities=true`(默认)保留已收集的实体和属性数据 |
@@ -1157,7 +1158,30 @@ $r.result.content[0].text
 
 | 工具 | 说明 |
 |---|---|
-| `web_search` | 综合 Web 搜索引擎(Bing 主 + Tavily 备用 + SQLite 缓存),支持 freshness / mkt / max_results |
+| `web_search` | **三级降级 + 熔断器**: Bing(有 key → 5 次失败熔断 5min) → Tavily(有 key → 同熔断) → DuckDuckGo HTML(无 key 永远可用) → 冻结缓存(7 天 stale); CurlHttpClient 自动读 HTTPS_PROXY 代理 |
+
+#### System 诊断工具 (2 个) — search 后一键观测
+
+| 工具 | 说明 |
+|---|---|
+| `system_diagnostics` | **统一观测快照**:缓存统计(按 source_type 分组的 total/ok/failed/key_sample)、引擎状态(keys + 熔断状态 + consecutive_failures)、实体按 type 分布、focus 概览。**LLM 搜完一堆工具后调这个,立即看到哪些成功、哪些挂了** |
+| `system_list_cache` | 列出最近缓存条目,可按 `source_type` 过滤。返回 `cache_key` / `fetch_status` / `hit_count` / `payload_size` / `updated_at`,用于排查"哪些搜索真的落地了、哪些是 failed" |
+
+#### 降级链与熔断器
+
+```
+web_search 请求进来
+  │
+  ├─ ① Bing(有 BING_SEARCH_KEY → 检查 breaker.is_open → 就绪放行)
+  │     连续 5 次失败 → open(冷却 5 分钟) → half_open 试探 → 恢复
+  ├─ ② Tavily(有 TAVILY_API_KEY → 同上熔断逻辑)
+  ├─ ③ DuckDuckGo HTML(最后兜底,无 key,不走熔断,走 HTTPS_PROXY)
+  └─ 全挂 → 冻结缓存回退(SQLite 7 天 TTL,标记 stale=true)
+```
+
+CurlHttpClient 构造时**自动读 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`**,libcurl 实例全链路口拿代理,不需要手动 set_proxy()。
+
+---
 
 > **Phase-1 骨架说明**:以上 19 个 Focus 工具 + `web_search` 路由全部通过 HTTP MCP 验证(2026-09-03 端到端测试)。参数解析(`relevance_threshold`/`max_depth`/`max_nodes` 写入读取一致)、状态机种子注册、相关性引擎都已落地。蔓延的"手"(真实 discover_neighbors 调 GitHub/arXiv/WebSearch API 拉邻居)和"窄操作提取"(真实去补属性缺口)将在 Phase-2 接入。
 

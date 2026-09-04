@@ -1,0 +1,733 @@
+我想通过多次抓取，把它的只能摘要从这种损失只能摘要模式慢慢把它给补全就是蔓延信息补全数据库，通过 MCP 的这种信息的蔓延模式，你觉得在这个 MCP 功能里面还要加哪些东西可以逐步的让蔓延开这个功能落地
+
+
+这是个很好的架构方向——**用窄而深的增量操作，绕过小模型能力上限，靠时间和次数换完整度**。核心转变是：从"每次抓取→生成一篇摘要"变成"每次抓取→向知识图谱里填充若干节点和边"。
+
+下面是具体要加的东西，按层拆解。
+
+## 一、数据层：从缓存升级为蔓延知识库
+
+现有 SQLite 只存原始 API 响应。需要加 5 张表，这是蔓延的地基。
+
+```sql
+-- 1. 实体表：所有被识别出的"东西"
+CREATE TABLE entities (
+  id          TEXT PRIMARY KEY,          -- 哈希: sha1(type+normalized_name)
+  type        TEXT NOT NULL,             -- paper|project|person|org|concept|dataset
+  name        TEXT NOT NULL,
+  alias       TEXT,                      -- JSON 数组，别名/曾用名
+  first_seen  TEXT NOT NULL,             -- ISO8601
+  last_seen   TEXT NOT NULL,
+  completeness REAL DEFAULT 0,           -- 0-1，已填充属性占目标属性集的比例
+  confidence  REAL DEFAULT 0,            -- 整体置信度
+  fetch_count INTEGER DEFAULT 0          -- 被定向抓取过多少次
+);
+CREATE INDEX idx_entities_type ON entities(type);
+CREATE INDEX idx_entities_completeness ON entities(completeness);
+
+-- 2. 属性表：实体的键值对，带来源和置信度——蔓延的核心存储
+CREATE TABLE attributes (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id   TEXT NOT NULL REFERENCES entities(id),
+  key         TEXT NOT NULL,             -- 如 abstract|authors|repo_url|stars|published_at
+  value       TEXT NOT NULL,             -- JSON 编码，支持字符串/数组/对象
+  source      TEXT NOT NULL,             -- arxiv|github|hn|...
+  source_id   TEXT,                      -- 原始 API 响应中的 ID
+  confidence  REAL NOT NULL DEFAULT 0.5, -- 小模型提取的置信度
+  verified    INTEGER DEFAULT 0,         -- 被多源验证次数
+  extracted_at TEXT NOT NULL,
+  model       TEXT,                      -- 用哪个模型提取的（e2b|e4b|...）
+  prompt_hash TEXT                       -- 去重用，同一 prompt 不重复提取
+);
+CREATE INDEX idx_attr_entity ON attributes(entity_id);
+CREATE INDEX idx_attr_key ON attributes(key);
+CREATE INDEX idx_attr_confidence ON attributes(confidence);
+CREATE UNIQUE INDEX idx_attr_uniq ON attributes(entity_id, key, value, source);
+
+-- 3. 关系表：实体之间的边
+CREATE TABLE relations (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  src_id      TEXT NOT NULL REFERENCES entities(id),
+  dst_id      TEXT NOT NULL REFERENCES entities(id),
+  rel_type    TEXT NOT NULL,             -- cites|author_of|depends_on|competes_with|extends
+  confidence  REAL DEFAULT 0.5,
+  source      TEXT NOT NULL,
+  extracted_at TEXT NOT NULL
+);
+CREATE INDEX idx_rel_src ON relations(src_id);
+CREATE INDEX idx_rel_dst ON relations(dst_id);
+
+-- 4. 提取任务表：记录每次小模型提取，用于重试和审计
+CREATE TABLE extraction_jobs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id   TEXT REFERENCES entities(id),
+  job_type    TEXT NOT NULL,             -- extract_attr|extract_rel|verify|merge
+  target_key  TEXT,                      -- 针对哪个属性
+  prompt      TEXT NOT NULL,
+  input_ref   TEXT,                      -- 输入文本的来源标识（缓存中的 doc id）
+  status      TEXT DEFAULT 'pending',    -- pending|running|done|failed|empty
+  result      TEXT,                      -- JSON，提取结果
+  attempts    INTEGER DEFAULT 0,
+  created_at  TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX idx_job_status ON extraction_jobs(status);
+
+-- 5. 缺口表：蔓延调度的"待办清单"
+CREATE TABLE gaps (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id   TEXT NOT NULL REFERENCES entities(id),
+  missing_key TEXT NOT NULL,             -- 缺哪个属性
+  priority    REAL DEFAULT 0.5,          -- 调度优先级
+  reason      TEXT,                      -- 为什么缺（从未提取|提取失败|置信度低）
+  fetch_plan  TEXT,                      -- JSON，建议从哪个源抓
+  created_at  TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX idx_gaps_priority ON gaps(priority DESC);
+CREATE INDEX idx_gaps_unresolved ON gaps(resolved_at IS NULL);
+```
+
+`attributes` 表是关键——它不是"一个实体一条记录"，而是"一个属性一条记录，多源可重复"。这样每次抓取只往里面插几条，自然形成增量蔓延。
+
+## 二、需要新增的 MCP 工具集
+
+在现有 71 个检索工具之外，加 6 类共约 18 个工具。每个工具都设计成**小模型能胜任的窄操作**。
+
+### 类 1：实体提取（从原始文本到节点）
+
+```
+extract_entities(input_text, entity_types) -> [entity]
+  输入: 一段文本（论文摘要、README、HN 评论串），要提取的类型
+  输出: 实体列表 [{type, name, alias, context_snippet}]
+  小模型适配: 一次只喂 1500 token 以内文本，类型限制 2-3 种
+  蔓延作用: 每次抓取产生新节点，节点数随时间增长
+
+link_entities(candidate_entity, existing_entities) -> matched_id|null
+  输入: 新提取的实体，现有实体候选列表
+  输出: 匹配到的现有实体 ID，或 null（表示新实体）
+  小模型适配: 纯字符串相似度 + 规则即可，不需要 LLM
+  蔓延作用: 防止同一论文/项目被重复建节点
+```
+
+### 类 2：属性提取（窄而深，一次只提一个属性）
+
+```
+extract_attribute(entity_id, key, source_text) -> {value, confidence}
+  输入: 实体 ID，要提取的属性名（如 "authors"、"repo_url"、"stars"），源文本
+  输出: 属性值 + 置信度 0-1
+  小模型适配: prompt 极短——"从以下文本中提取 {entity} 的 {key}，只输出 JSON"
+  蔓延作用: 这是最核心的操作。一次抓取对一个实体可能只补 1-2 个属性，
+           但 10 次抓取后该实体的属性就慢慢齐了
+
+batch_extract_attributes(entity_ids, key, source_docs) -> [{entity_id, value, confidence}]
+  批量版，一次 prompt 处理最多 5 个实体的同一个属性
+```
+
+关键设计：**不要让小模型一次提取实体的所有属性**。E2B 在 4K ctx 下做多字段结构化提取会丢字段、会幻觉。一次一个属性，prompt 极简，准确率能到 85%+，靠次数补全。
+
+### 类 3：关系提取（建边）
+
+```
+extract_relations(source_text, context_entities) -> [{src, dst, rel_type, confidence}]
+  输入: 文本，文本中已识别的实体列表
+  输出: 关系三元组
+  小模型适配: 限制 rel_type 为预定义的 8 种，不让模型自由发挥
+  蔓延作用: 节点有了之后，边随抓取次数慢慢长出来
+
+infer_missing_entities(entity_id, relation_type) -> [candidate_name]
+  输入: 已知实体，要找的关系类型（如 "cites"）
+  输出: 该实体可能关联但尚未入库的实体名称列表
+  小模型适配: 基于已有属性推理，如"这篇论文的参考文献有哪些"
+  蔓延作用: 主动发现新节点，而不是等抓取偶然碰到
+```
+
+### 类 4：合并与验证（多源融合，提升置信度）
+
+```
+merge_attributes(entity_id, key) -> {merged_value, final_confidence, sources}
+  输入: 实体 + 属性
+  逻辑: 聚合该属性所有来源的值，相同的合并，矛盾的按置信度加权，
+        多源一致则 verified+1，confidence 提升
+  输出: 合并后的值
+  蔓延作用: 同一属性被 3 个独立源提取到相同值，confidence 从 0.5→0.95
+
+verify_attribute(entity_id, key, new_source_text) -> {is_consistent, delta}
+  输入: 已有属性，新的源文本
+  输出: 新源是否支持已有值，有什么补充
+  蔓延作用: 定向验证低置信度属性
+
+incremental_summarize(entity_id, new_info) -> updated_summary
+  输入: 实体 ID，新提取到的信息片段
+  逻辑: 读取已有摘要，用新信息做增量更新，不是重写
+  输出: 更新后的摘要
+  蔓延作用: 摘要从 2 句话慢慢长成完整描述
+```
+
+### 类 5：缺口检测与调度（蔓延的"大脑"）
+
+```
+detect_gaps(entity_id) -> [{missing_key, priority, fetch_plan}]
+  输入: 实体 ID
+  逻辑: 对比该类型实体的"目标属性集"（如 paper 需要 title|authors|abstract|
+        published_at|citations|code_repo|venue），找出缺失或置信度<0.7 的
+  输出: 缺口列表，每个缺口带建议抓取源
+  蔓延作用: 知道"下一步该抓什么"，而不是盲目全量抓
+
+plan_crawl_batch(gap_list, budget) -> [fetch_task]
+  输入: 缺口列表，本轮时间/API 配额预算
+  输出: 抓取任务列表，按优先级排序
+  逻辑: 高优先级缺口（高关联度实体 + 高价值属性）先抓，
+        同一源的多个缺口合并为一次 API 调用
+  蔓延作用: 把"每10分钟全抓"变成"每10分钟定向补缺口"
+
+get_sprawl_stats() -> {entities, attributes, relations, avg_completeness, growth_rate}
+  蔓延进度看板
+```
+
+### 类 6：查询输出（用户看到的结果）
+
+```
+query_entity(name_or_id) -> {entity, attributes, relations, summary}
+  自动聚合所有已填充的属性和关系，生成当前最完整的视图
+
+query_graph(start_entity, depth, rel_types) -> {nodes, edges}
+  关系图谱子图查询，看蔓延到了哪里
+
+compare_versions(entity_id, from_date, to_date) -> {added, removed, changed}
+  看一个实体的信息是怎么随时间慢慢补全的
+```
+
+## 三、蔓延调度引擎：从定时全抓到定向蔓延
+
+现有逻辑是"每10分钟→抓所有源→生成摘要"。要改成：
+
+```
+每 10 分钟触发一次，执行以下流水线:
+
+┌─────────────────────────────────────────────────┐
+│ 1. 扫描 gaps 表，取 priority TOP 20 未解决缺口    │
+│ 2. plan_crawl_batch → 生成 3-5 个定向抓取任务     │
+│    （不是全量抓，是针对缺口实体去特定源查）         │
+│ 3. 执行抓取，结果写入现有缓存层                    │
+│ 4. 对每个新文档:                                  │
+│    a. extract_entities → 新节点入库               │
+│    b. 对文档中涉及的已有实体:                     │
+│       extract_attribute（一次1-2个属性）          │
+│       extract_relations                          │
+│ 5. merge_attributes → 提升已有属性置信度           │
+│ 6. detect_gaps → 对本轮涉及的实体重新计算缺口      │
+│ 7. 新缺口写入 gaps 表，下一轮处理                  │
+└─────────────────────────────────────────────────┘
+```
+
+关键差异：
+- **抓取量大幅减少**：不再每轮抓 9 个源全量，只抓 3-5 个定向查询
+- **API 配额省了**，可以用免费额度跑
+- **信息有方向地蔓延**：从一个种子实体（比如一篇论文）出发，先补它的属性→发现它引用的论文→补那些论文的属性→发现作者→补作者的其他论文→... 像水一样渗开
+- **completeness 指标可观测**：每个实体有完成度，整体有平均完成度，能看到蔓延进度
+
+## 四、E2B 小模型适配策略
+
+E2B 能力有限，必须按这个原则用：
+
+| 原则 | 具体做法 |
+|------|---------|
+| **一次只做一件事** | extract_attribute 一次只提一个 key，不要多字段 |
+| **Prompt 极短** | 系统 prompt 控制在 200 token 内，输入文本控制在 1500 token |
+| **输出强制 JSON** | 用 grammar 约束（llama.cpp 的 `--grammar`），只输出合法 JSON |
+| **失败就重试，换角度** | extraction_jobs 记录失败，重试时换 prompt 模板或换源文本 |
+| **置信度低不丢人** | E2B 提取的默认 confidence=0.5，等多源验证后再升 |
+| **复杂推理交给 E4B（如果有）** | infer_missing_entities、merge 冲突解决这类，可以标记为 "needs_e4b"，攒一批偶尔跑一次 |
+| **不用 E2B 做最终摘要** | 摘要由 attributes 表的结构化数据程序化生成，不依赖 LLM 生成质量 |
+
+最后一条很重要：**最终输出不要让小模型写**。从 attributes 表读数据，用模板拼出摘要，质量稳定且零幻觉。LLM 只负责"从非结构化文本提取结构化字段"这一件事。
+
+## 五、落地优先级（按周排）
+
+```
+第1周: 数据库 5 表 + extract_entities + extract_attribute + 简单 gap 检测
+       → 能跑通"抓取→提取属性→入库"的最小闭环
+
+第2周: link_entities（去重）+ merge_attributes + extract_relations
+       → 多源融合开始生效，关系图谱开始建边
+
+第3周: plan_crawl_batch（定向调度）+ infer_missing_entities（主动发现）
+       → 从"被动全抓"升级为"主动蔓延"
+
+第4周: verify_attribute + incremental_summarize + query_graph + 看板
+       → 可观测、可查询、摘要随时间增长
+```
+
+## 六、一个具体的蔓延例子
+
+以种子论文 "Attention Is All You Need" 为例，看 4 周内怎么蔓延：
+
+```
+第1轮: 抓到 arXiv 摘要
+  → extract_entities: {paper: "Attention Is All You Need"}
+  → extract_attribute(key=authors): ["Vaswani", "Shazeer", ...] confidence=0.8
+  → extract_attribute(key=abstract): "..." confidence=0.9
+  → gaps: missing [published_at, citations, code_repo, venue]
+
+第3轮: 抓到 Semantic Scholar 详情页
+  → extract_attribute(key=citations): 120000+ confidence=0.7
+  → extract_attribute(key=venue): "NeurIPS 2017" confidence=0.9
+  → extract_relations: cites → [paper: "Neural Machine Translation by Jointly Learning..."]
+  → 新实体入库: "Neural Machine Translation by Jointly Learning to Align and Translate"
+  → gaps for 新论文: missing [authors, abstract, published_at, ...]
+
+第10轮: 抓到 GitHub 搜索结果
+  → extract_attribute(key=code_repo): "github.com/tensorflow/tensor2tensor" confidence=0.6
+  → verify_attribute(authors, 新源文本): 一致 → verified=2, confidence=0.95
+  → 新实体: {project: "tensor2tensor", org: "Google"}
+
+第20轮: 蔓延到作者 Vaswani 的其他论文
+  → infer_missing_entities(Vaswani, "author_of") → ["Memory Transformer", ...]
+  → 定向抓取这些论文 → 新节点入库 → 继续蔓延
+```
+
+4 周后，从 1 篇论文蔓延出可能 50-100 个实体、200+ 属性、100+ 关系，且每个实体的完成度在 40-80% 之间。这就是"蔓延信息补全数据库"。
+
+## 总结：要加的核心就三件事
+
+1. **属性级别的增量存储**（attributes 表 + 置信度 + 多源）——让信息可以一条一条地补
+2. **窄操作提取工具**（一次一个属性，强制 JSON，失败重试）——让 E2B 这种小模型也能可靠贡献
+3. **缺口驱动的定向调度**（gaps 表 + plan_crawl_batch）——让抓取有方向地蔓延，而不是盲目重复
+
+现有 research-mcp 的 71 个检索工具是"手"，这三层是"脑"和"记忆"。手已经有了，加脑和记忆就能蔓延。
+
+
+其实这个想法比较接近于 RSS 这种，但是会比 RSS 更加智能化，更加定向。所以我把它做成定向的，特别是不需要那么大规模的索引，但是比较定向的，关注性索引，比如给它一个节点，它会一直这样设计下，并且会在你的范之内一直定向搜索，这里面的算法和比较完整的思路在这个 mcp 里面。
+
+
+对，这个定位更精准了——**不是通用知识图谱，是定向知识雷达**。给一个种子，划定一个关注范围，然后在这个范围内持续深耕、自动跟踪，类似 RSS 但每一条订阅都会自己长出新的相关订阅。
+
+下面把这个"定向蔓延"的完整算法和 MCP 设计写清楚。
+
+## 一、核心抽象：关注域（Focus）
+
+整个系统围绕一个或多个 **Focus** 运转。每个 Focus 是一个结构化的关注画像，不是简单的关键词。
+
+```sql
+-- 关注域：用户定义的"我要跟踪什么"
+CREATE TABLE focuses (
+  id            TEXT PRIMARY KEY,          -- f_xxxx
+  name          TEXT NOT NULL,             -- "Transformer 架构演进"
+  description   TEXT,                      -- 用户原始自然语言描述
+  seed_entities TEXT NOT NULL,             -- JSON 数组，种子实体 ID 列表
+  keywords      TEXT NOT NULL,             -- JSON 数组，正向关键词（用于相关性初筛）
+  exclude_words TEXT,                      -- JSON 数组，排除词（碰到就降权或剪枝）
+  allowed_rels  TEXT NOT NULL,             -- JSON 数组，允许蔓延的关系类型
+  allowed_sources TEXT,                    -- JSON 数组，优先源（空=全部9源）
+  max_depth     INTEGER DEFAULT 3,         -- 最大蔓延深度（从种子算起）
+  relevance_threshold REAL DEFAULT 0.55,   -- 相关性阈值，低于此只记录不扩展
+  max_nodes     INTEGER DEFAULT 500,       -- 该关注域最大节点数（防失控）
+  status        TEXT DEFAULT 'active',     -- active|paused|exhausted
+  created_at    TEXT NOT NULL,
+  last_crawl_at TEXT
+);
+
+-- 实体与关注域的关联（一个实体可属于多个 focus）
+CREATE TABLE focus_members (
+  focus_id    TEXT NOT NULL REFERENCES focuses(id),
+  entity_id   TEXT NOT NULL REFERENCES entities(id),
+  depth       INTEGER NOT NULL,            -- 距种子的跳数
+  relevance   REAL NOT NULL,               -- 0-1，与关注域的相关性
+  sprawl_status TEXT NOT NULL,             -- seed|active|boundary|pruned|exhausted
+  last_checked TEXT,                       -- 上次扩展检查时间
+  check_count INTEGER DEFAULT 0,
+  PRIMARY KEY (focus_id, entity_id)
+);
+CREATE INDEX idx_fm_status ON focus_members(focus_id, sprawl_status);
+CREATE INDEX idx_fm_relevance ON focus_members(focus_id, relevance DESC);
+```
+
+`sprawl_status` 是定向蔓延的状态机核心：
+
+| 状态 | 含义 | 行为 |
+|------|------|------|
+| `seed` | 种子节点 | 始终扩展 |
+| `active` | 在范围内且相关性高 | 每轮优先扩展其邻居 |
+| `boundary` | 相关性刚过阈值 | 只记录属性，不向外扩展（防止跑题） |
+| `pruned` | 低于阈值或命中排除词 | 只存基本信息，不再抓取 |
+| `exhausted` | 已扩展完所有可发现的邻居 | 转入定期跟踪模式（类 RSS） |
+
+## 二、定向蔓延算法
+
+不是 BFS（所有邻居平等扩展），而是**加权优先级蔓延 + 相关性剪枝**。
+
+```
+每轮调度（每 10 分钟）对每个 active focus 执行:
+
+┌──────────────────────────────────────────────────────────┐
+│ 1. 选节点                                                │
+│    从 focus_members 中取 sprawl_status='active'          │
+│    按 relevance * (1 / check_count) 排序，取 TOP 5       │
+│    （相关性高且很久没查的优先）                            │
+│                                                          │
+│ 2. 对每个选中节点，发现邻居                               │
+│    根据节点类型选择"发现策略":                            │
+│    - paper → 查引用(citations) + 被引(cited_by) + 作者其他论文 │
+│    - project → 查依赖(deps) + 依赖者(used_by) + 作者其他项目  │
+│    - person  → 查近期论文 + 参与项目 + 合作者              │
+│    - org     → 查近期发布 + 成员                          │
+│    调用现有 research-mcp 的 71 个工具做定向查询           │
+│                                                          │
+│ 3. 对每个新发现的候选实体，算相关性分数                    │
+│    relevance = 0.4 * keyword_overlap                     │
+│              + 0.3 * embedding_similarity(可选)          │
+│              + 0.2 * relation_type_weight                │
+│              + 0.1 * source_trust                        │
+│              * depth_decay^(depth)                       │
+│    其中:                                                 │
+│    - keyword_overlap: 候选实体名称/摘要与 focus.keywords 的交集比例 │
+│    - relation_type_weight: cites=0.9, author_of=0.8,     │
+│      depends_on=0.7, competes_with=0.5                   │
+│    - depth_decay: 0.85，每跳衰减 15%                     │
+│                                                          │
+│ 4. 分类入队                                             │
+│    relevance >= threshold 且 depth < max_depth → active  │
+│    relevance >= threshold 且 depth >= max_depth → boundary│
+│    relevance < threshold → boundary（只记不扩）           │
+│    命中 exclude_words → pruned                           │
+│    节点数达到 max_nodes → 新节点只入 boundary             │
+│                                                          │
+│ 5. 属性提取（窄操作）                                    │
+│    对本轮新发现 + 选中的 active 节点:                    │
+│    extract_attribute（一次 1-2 个 key）→ 入 attributes 表│
+│    merge_attributes → 提升置信度                         │
+│                                                          │
+│ 6. 更新状态                                             │
+│    选中节点 check_count++，last_checked=now              │
+│    如果一个 active 节点连续 3 轮没有发现新邻居 → exhausted │
+│    exhausted 节点转入"定期跟踪"（见下）                   │
+└──────────────────────────────────────────────────────────┘
+```
+
+关键设计点：
+
+**深度衰减 + 相关性阈值双重约束**，保证蔓延不会跑题。比如种子是"Transformer 论文"，蔓延到作者→作者的其他论文（还在范围内）→作者的个人博客文章（可能 boundary）→博客里提到的菜谱（pruned）。三层过滤后不会跑偏。
+
+**`boundary` 状态很重要**——它不是扔掉，是"存下来但不往外扩"。这样如果以后用户扩大关注范围，或者某个 boundary 节点被多个 active 节点引用（间接证明相关性），可以升级为 active。
+
+## 三、类 RSS 的持续跟踪机制
+
+`exhausted` 节点不是结束，而是从"蔓延模式"切换到"跟踪模式"。
+
+```sql
+-- 跟踪计划：每个 exhausted/seed 节点有自己的更新检查节奏
+CREATE TABLE track_schedules (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  focus_id      TEXT NOT NULL,
+  entity_id     TEXT NOT NULL,
+  track_type    TEXT NOT NULL,       -- new_citations|new_commits|new_papers|new_versions|news
+  interval_hours INTEGER NOT NULL,   -- 检查间隔，自适应
+  last_checked  TEXT,
+  last_result   TEXT,                -- JSON，上次发现了什么新东西
+  consecutive_empty INTEGER DEFAULT 0,
+  FOREIGN KEY (focus_id, entity_id) REFERENCES focus_members(focus_id, entity_id)
+);
+```
+
+**自适应间隔算法**：
+
+```
+初始 interval = 24 小时
+
+每次检查:
+  发现新内容 → interval = max(interval * 0.7, 6h)  （活跃源，缩短间隔）
+  连续 3 次空 → interval = min(interval * 1.5, 168h) （沉寂源，拉长到一周）
+  连续 10 次空 → 暂停跟踪，标记为 dormant
+```
+
+这比 RSS 聪明：RSS 是固定间隔轮询，不管有没有更新。这个是**活跃的源查得勤，沉寂的源查得疏**，省 API 配额和算力。
+
+跟踪触发的新内容，自动走一遍上面的蔓延算法（新引用论文→算相关性→入队→提取属性），所以知识库会自己长大。
+
+## 四、在 MCP 里要加的工具
+
+围绕 Focus 这个核心，加这些工具：
+
+### Focus 管理
+
+```
+create_focus(name, description, seed_queries, options) -> focus_id
+  输入: 名称，自然语言描述（如"跟踪 Transformer 架构在 2025-2026 的新进展"），
+        种子搜索词（用于找到初始实体），选项（max_depth, keywords, sources 等）
+  逻辑: 用 E2B 从 description 中提取 keywords + exclude_words + allowed_rels，
+        用种子搜索词调用现有检索工具找到种子实体，写入 focuses 表
+  输出: focus_id
+
+update_focus(focus_id, patch) -> focus
+  修改关注范围（加关键词、调阈值、扩深度）
+
+list_focuses() -> [focus_summary]
+  列出所有关注域，含节点数、平均完成度、增长速度
+
+delete_focus(focus_id, keep_entities)
+  删除关注域，可选保留已收集的实体数据
+```
+
+### 蔓延控制
+
+```
+get_focus_graph(focus_id, depth, min_relevance) -> {nodes, edges}
+  返回该关注域的蔓延图谱，可视化用
+
+get_sprawl_queue(focus_id, limit) -> [{entity, relevance, status, next_action}]
+  查看下一轮准备处理哪些节点，类似"蔓延队列"
+
+prune_entity(focus_id, entity_id, reason)
+  人工剪枝，把某个 active 节点降为 pruned（用户觉得跑题了）
+
+promote_entity(focus_id, entity_id)
+  人工提升，把 boundary 节点升为 active（用户觉得相关）
+
+set_entity_priority(focus_id, entity_id, boost)
+  人工调整优先级，让某个节点被优先扩展
+```
+
+### 跟踪与增量
+
+```
+get_updates_since(focus_id, since) -> [{entity, changes, new_entities}]
+  类 RSS 的"有什么新东西"查询，返回自 since 以来的所有增量
+
+get_entity_timeline(entity_id) -> [{timestamp, attribute_changes, new_relations}]
+  单个实体的变化时间线，看信息是怎么慢慢补全的
+
+export_focus(focus_id, format) -> file
+  导出整个关注域为 JSON/Markdown/OPML（OPML 可以导入 RSS 阅读器）
+```
+
+### 相关性判断（内部工具，但暴露给用户调试）
+
+```
+estimate_relevance(focus_id, entity_description) -> {score, factors}
+  给一段文本或实体描述，算它在该关注域下的相关性分数和各维度得分
+  用于调试蔓延边界是否合理
+```
+
+## 五、与 RSS 的本质区别
+
+| 维度 | RSS | 这个定向蔓延 MCP |
+|------|-----|----------------|
+| 订阅单元 | URL/Feed | 实体（论文/项目/人/概念） |
+| 发现新内容 | 被动等 Feed 更新 | 主动发现引用/依赖/作者的新内容 |
+| 范围控制 | 用户手动加/删订阅 | 相关性算法自动扩/剪 |
+| 更新频率 | 固定间隔 | 自适应间隔（活跃源勤查） |
+| 内容结构 | 原始文章 HTML | 结构化属性 + 关系 + 置信度 |
+| 去重 | 按 URL | 按实体哈希 + 属性合并 |
+| 跨源关联 | 无（每个 Feed 孤立） | 有（论文↔代码↔作者↔讨论串在一起） |
+| 搜索能力 | 只能看已订阅的 | 主动搜索范围内的新实体 |
+
+一句话：RSS 是"你订什么就看什么"，这个是"你给个方向，它自己找到相关的东西并持续跟踪"。
+
+## 六、一个完整的运行例子
+
+用户执行：
+```
+create_focus(
+  name="llama.cpp 生态跟踪",
+  description="跟踪 llama.cpp 项目及其周边推理引擎、量化技术、硬件适配的最新进展",
+  seed_queries=["llama.cpp github", "ggerganov llama.cpp"]
+)
+```
+
+系统自动做：
+1. E2B 从 description 提取 keywords=["llama.cpp","推理引擎","量化","GGUF","llama"], exclude=["宠物","烹饪"]
+2. 搜索找到种子实体: {project: "ggerganov/llama.cpp"}, {person: "Georgi Gerganov"}
+3. 写入 focuses，两个种子标记为 sprawl_status=seed
+
+**第 1 轮（10 分钟后）**：
+- 处理 seed 节点 llama.cpp
+- 发现策略: project → 查依赖 + 依赖者 + 作者其他项目
+- 发现: {project: "ggml"}, {project: "llama-cpp-python"}, {person: "各 contributor"}
+- 算相关性: ggml(0.92, active), llama-cpp-python(0.88, active), 某 contributor(0.6, boundary)
+- 提取属性: llama.cpp 的 stars, latest_release, open_issues
+- ggml 入队下一轮
+
+**第 5 轮**：
+- 蔓延到 llama-cpp-python → 发现它依赖的 {project: "pydantic"}
+- pydantic 相关性 0.35（跟推理引擎关系远）→ boundary，只记不扩
+- 不会蔓延到 pydantic 的依赖（防止跑到 Python 生态的汪洋大海）
+
+**第 20 轮（约 3 小时后）**：
+- llama.cpp 连续 3 轮没发现新依赖 → exhausted
+- 自动创建 track_schedule: llama.cpp, track_type=new_commits+new_releases, interval=6h
+- ggml 同样 exhausted → track, interval=12h
+- 但 llama-cpp-python 还在 active（周边项目更新频繁）
+
+**一周后**：
+- 跟踪模式发现 llama.cpp 有新 release → 提取 release notes → 发现提到了"新硬件后端 Vulkan"
+- 新实体 {concept: "Vulkan 推理后端"} 相关性 0.7 → active → 开始蔓延
+- 自动发现其他支持 Vulkan 的推理引擎项目 → 入队
+
+用户随时可以 `get_updates_since(focus_id, "1 week ago")` 拿到这一周的所有新东西，比 RSS 丰富得多——不只是"llama.cpp 发了新版本"，还有"新版本提到的 Vulkan 后端相关的 3 个其他项目也有更新"。
+
+## 七、落地顺序
+
+```
+第1步: focuses + focus_members 表 + create_focus + 基础蔓延循环
+       （能从种子出发，发现邻居，算相关性，分类入队）
+
+第2步: 属性提取 + merge（复用之前设计的 extract_attribute）
+       （蔓延的同时开始填数据）
+
+第3步: track_schedules + 自适应间隔 + get_updates_since
+       （exhausted 节点转入跟踪，类 RSS 增量输出）
+
+第4步: 人工干预工具（prune/promote/set_priority）+ 图谱可视化
+       （用户能纠偏，能看到蔓延到哪了）
+
+第5步: 多 focus 交叉（实体被多个 focus 引用时自动升权）+ 导出
+```
+
+前 3 步做完就是一个可用的"定向知识雷达"了。第 4-5 步是体验优化。
+
+核心就一句话：**用 Focus 定义范围，用相关性分数做剪枝，用状态机控制蔓延节奏，用自适应跟踪做持续更新**。现有 research-mcp 的 71 个检索工具直接当"发现邻居"的手来用，不需要改。
+
+这里面还有一个问题，就是说涉及到机器人协议，我们需要在某些时候还是能够需要它去上搜索引擎，但是不是大规模的那种，就是说一次性上，上去以后抓一点下来，然后放到库里面，就就慢慢消化。就这种，选哪个搜索引擎会比较是特别是在国内这种环境
+
+
+这个问题很实际——9 个直接 API 源覆盖不到的内容（博客、新闻、论坛讨论、冷门项目），需要搜索引擎做补充发现。核心原则是**用官方 API，不爬搜索结果页**（百度/Bing 的 robots.txt 都 Disallow 搜索结果页，爬了既违规又不稳定）。
+
+## 国内环境下的选项对比
+
+| 方案 | 国内直连 | 官方 API | 免费配额 | 结果质量 | 合规性 | 适合场景 |
+|------|---------|---------|---------|---------|--------|---------|
+| **Bing Web Search (Azure)** | ✅ 稳定 | ✅ | 1000次/月 | ★★★★ | ✅ | **主力首选** |
+| SerpAPI (Google代理) | ❌ 需代理 | ✅ | 100次/月 | ★★★★★ | ✅ | 高质量补充 |
+| Tavily API | ❌ 需代理 | ✅ | 1000次/月 | ★★★★☆ | ✅ | AI Agent 友好 |
+| Brave Search API | ⚠️ 时好时坏 | ✅ | 2000次/月 | ★★★ | ✅ | 隐私/备选 |
+| 百度通用搜索 | ✅ | ❌ 不开放 | — | ★★★★ | ❌ | 不推荐 |
+| DuckDuckGo (非官方库) | ⚠️ 不稳定 | ❌ 无官方 | 无限 | ★★★ | ⚠️ 灰产 | 应急兜底 |
+
+## 推荐方案：Bing 主力 + Tavily 备选
+
+### 主力：Bing Web Search API（Azure Cognitive Services）
+
+这是国内环境下**唯一同时满足"官方 API + 直连 + 有免费层 + 结果可用"**的选项。
+
+```
+接入方式: Azure Portal → 创建 "Bing Search" 资源
+定价:     Free 层 1000次/月（永久免费）
+          S1 层 ~$3/1000次（按量付费，无最低消费）
+国内访问: api.cognitive.microsoft.com 直连，延迟 ~80-150ms
+返回:     结构化 JSON，含 name/url/snippet/datePublished
+```
+
+调用示例：
+```python
+import requests
+
+def bing_search(query, count=10, mkt="zh-CN"):
+    # mkt 选 zh-CN 偏中文结果，选 en-US 偏国际结果
+    # 定向知识雷达建议根据 focus 自动选: 技术类用 en-US，国内新闻用 zh-CN
+    resp = requests.get(
+        "https://api.cognitive.microsoft.com/bing/v7.0/search",
+        headers={"Ocp-Apim-Subscription-Key": "YOUR_KEY"},
+        params={"q": query, "count": count, "mkt": mkt, "freshness": "Month"}
+    )
+    return [
+        {"title": r["name"], "url": r["url"], "snippet": r["snippet"],
+         "date": r.get("datePublished", "")}
+        for r in resp.json()["webPages"]["value"]
+    ]
+```
+
+`freshness="Month"` 参数很关键——只返回最近一个月的结果，正好匹配"定向跟踪新动态"的场景，避免搜到一堆过时内容。
+
+### 备选：Tavily API（当 Bing 结果不够好时）
+
+Tavily 是专为 AI Agent 设计的搜索 API，返回的结果已经过相关度排序和去重，直接喂给 LLM 就行，省掉后处理。
+
+```
+接入: https://tavily.com 注册拿 API key
+定价: Free 1000次/月，付费 $10/4000次
+国内: 需要代理（和访问 HuggingFace 一套代理即可）
+特色: search_depth="advanced" 会自动抓取页面正文，不只是 snippet
+```
+
+```python
+def tavily_search(query, max_results=8):
+    resp = requests.post(
+        "https://api.tavily.com/search",
+        json={"api_key": "YOUR_KEY", "query": query,
+              "search_depth": "advanced", "max_results": max_results,
+              "include_answer": False}
+    )
+    return [{"title": r["title"], "url": r["url"],
+             "content": r["content"], "score": r["score"]}
+            for r in resp.json()["results"]]
+```
+
+`search_depth="advanced"` 会实际访问页面并返回正文内容——这对"慢慢消化"模式特别有用，等于搜索+抓取一步完成，结果直接入库等 LLM 提取。
+
+## 在 MCP 里怎么集成
+
+加一个工具，内部做多引擎 fallback 和限流：
+
+```
+web_search(query, focus_id, options) -> [search_result]
+  输入: 查询词，关联的 focus_id（用于限流和缓存），选项
+  逻辑:
+    1. 查缓存：相同 query 7 天内直接返回缓存结果
+    2. 限流：同一 focus 每轮（10分钟）最多 3 次搜索调用
+    3. 主用 Bing，Bing 失败或结果<3 条时 fallback 到 Tavily
+    4. 结果写入统一缓存层（和现有 9 源共用缓存表）
+    5. 返回结构化结果列表
+  输出: [{title, url, snippet, content, source_engine, fetched_at}]
+```
+
+### 搜索引擎在蔓延算法中的位置
+
+它不是独立数据源，而是**"发现策略"的兜底通道**：
+
+```
+对一个 active 节点做邻居发现时:
+  1. 先用 research-mcp 现有的 9 个直接 API 源（arXiv/GitHub/HN/...）
+  2. 9 源结果不足或找不到相关内容时 → 调用 web_search
+  3. web_search 找到的 URL，再判断是否需要抓取正文
+     （大部分情况 snippet 就够 LLM 提取实体和属性了）
+  4. 只有 snippet 信息不够时，才用 libcurl 抓正文（遵守目标站 robots）
+```
+
+这样搜索引擎的调用量非常低——每个节点可能就触发 1-2 次搜索，一个 focus 每天几十次顶天了，免费配额完全够用。
+
+### 抓取正文的合规策略
+
+搜索结果里的 URL，如果需要抓正文：
+
+```python
+def fetch_page(url):
+    # 1. 先查 robots.txt（缓存 24 小时）
+    if not is_allowed_by_robots(url):
+        return None  # 不抓
+    # 2. 加真实 User-Agent，标明身份
+    headers = {"User-Agent": "ResearchMCPBot/1.0 (contact: your@email.com)"}
+    # 3. 同域名请求间隔 >= 3 秒
+    time.sleep(domain_cooldown(url))
+    resp = requests.get(url, headers=headers, timeout=10)
+    # 4. 只存文本，不存图片/资源
+    return extract_text(resp.text)
+```
+
+小批量 + 低频 + 标明身份 + 遵守 robots，基本不会有任何合规问题。
+
+## 为什么不选百度
+
+百度没有公开的通用网页搜索 API。网上能找到的"百度搜索 API"要么是：
+- 百度智能云的**特定场景** API（如地图、知识图谱、内容审核），不是通用网页搜索
+- 第三方爬百度结果页的服务（违反百度 robots，随时可能被封）
+- 百度联盟的搜索框 JS 嵌入（不是 API）
+
+如果确实需要百度的中文结果，唯一合规的方式是**用 Bing 的 `mkt="zh-CN"`**，Bing 中国版的结果和百度重合度很高，且有官方 API。
+
+## 一句话总结
+
+**Bing Web Search API 当主力（国内直连、免费 1000 次/月、合规），Tavily 当备选（结果质量高、advanced 模式直接返回正文，需代理）。** 在蔓延算法里作为 9 个直接 API 源的兜底，每个 focus 每轮最多 3 次搜索调用，结果先入缓存再由 LLM 慢慢消化。免费配额跑 2-3 个 focus 完全够用。
+
+
+当前chrome:"C:\Program Files\Google\Chrome\Application\chrome.exe"

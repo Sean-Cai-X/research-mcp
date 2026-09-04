@@ -70,6 +70,24 @@ std::string get_ca_bundle_path() {
 
 CurlHttpClient::CurlHttpClient(const std::string& user_agent, int timeout_seconds)
     : user_agent_(user_agent), timeout_seconds_(timeout_seconds) {
+    // 自动从环境变量读代理(优先级: HTTPS_PROXY > HTTP_PROXY > ALL_PROXY)
+    // 这样所有 CurlHttpClient 实例(包括 web_search、GitHub API 等)
+    // 都能直接拿到与 WebView2 相同的代理配置
+    auto read_env = [](const char* name) -> std::string {
+        const char* v = std::getenv(name);
+        return v ? std::string(v) : "";
+    };
+    std::string proxy = read_env("HTTPS_PROXY");
+    if (proxy.empty()) proxy = read_env("https_proxy");
+    if (proxy.empty()) proxy = read_env("HTTP_PROXY");
+    if (proxy.empty()) proxy = read_env("http_proxy");
+    if (proxy.empty()) proxy = read_env("ALL_PROXY");
+    if (proxy.empty()) proxy = read_env("all_proxy");
+    if (!proxy.empty()) {
+        // 去掉可能的 "http://" 前缀(libcurl 自动处理协议)
+        proxy_url_ = proxy;
+    }
+
     // 进程级 curl 全局初始化(线程安全,仅一次)
     std::call_once(global_init_flag_, []() {
         CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT);

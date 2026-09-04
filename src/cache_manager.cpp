@@ -1612,6 +1612,107 @@ json CacheManager::get_source_health() {
     return {{"sources", arr}, {"breakers", breaker_.dump_all()}};
 }
 
+json CacheManager::get_cache_summary(int key_sample_limit) {
+    if (!cfg_.enabled || !db_) return {{"enabled", false}};
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // 按 source_type 分组统计 total / ok / failed / stale
+    std::string sql =
+        "SELECT source_type, fetch_status, COUNT(*) as cnt "
+        "FROM cache_entries "
+        "GROUP BY source_type, fetch_status;";
+    Stmt s;
+    if (!prepare(db_, s, sql)) return json::object();
+
+    json summary = json::object();
+
+    while (sqlite3_step(s.p) == SQLITE_ROW) {
+        std::string st = (const char*)sqlite3_column_text(s.p, 0);
+        std::string fs = (const char*)sqlite3_column_text(s.p, 1);
+        int64_t cnt = sqlite3_column_int64(s.p, 2);
+
+        if (!summary.contains(st)) {
+            summary[st] = {
+                {"total", 0},
+                {"ok", 0},
+                {"failed", 0},
+                {"partial", 0},
+                {"rate_limited", 0},
+                {"key_sample", json::array()}
+            };
+        }
+        summary[st]["total"] = (int64_t)summary[st]["total"] + cnt;
+        if (fs == "ok")       summary[st]["ok"]       = (int64_t)summary[st]["ok"] + cnt;
+        else if (fs == "failed")    summary[st]["failed"]    = (int64_t)summary[st]["failed"] + cnt;
+        else if (fs == "partial")   summary[st]["partial"]   = (int64_t)summary[st]["partial"] + cnt;
+        else if (fs == "rate_limited") summary[st]["rate_limited"] = (int64_t)summary[st]["rate_limited"] + cnt;
+    }
+
+    // 取每个 source_type 的最近几个 key
+    for (auto it = summary.begin(); it != summary.end(); ++it) {
+        std::string st = it.key();
+        std::string key_sql =
+            "SELECT cache_key FROM cache_entries "
+            "WHERE source_type='" + sql_escape(st) + "' "
+            "ORDER BY updated_at DESC LIMIT " + std::to_string(key_sample_limit) + ";";
+        Stmt ks;
+        if (prepare(db_, ks, key_sql)) {
+            while (sqlite3_step(ks.p) == SQLITE_ROW) {
+                it.value()["key_sample"].push_back((const char*)sqlite3_column_text(ks.p, 0));
+            }
+        }
+    }
+
+    // 实体统计
+    json entities_by_type = json::object();
+    {
+        std::string et_sql =
+            "SELECT entity_type, COUNT(*) FROM entity_index GROUP BY entity_type;";
+        Stmt es;
+        if (prepare(db_, es, et_sql)) {
+            while (sqlite3_step(es.p) == SQLITE_ROW) {
+                entities_by_type[(const char*)sqlite3_column_text(es.p, 0)] =
+                    sqlite3_column_int64(es.p, 1);
+            }
+        }
+    }
+    summary["_entities_by_type"] = entities_by_type;
+
+    return summary;
+}
+
+json CacheManager::list_cache(const std::string& source_type, int limit) {
+    if (!cfg_.enabled || !db_) return json::array();
+    std::lock_guard<std::mutex> lk(mu_);
+    if (limit < 1) limit = 1;
+    if (limit > 200) limit = 200;
+
+    std::string sql =
+        "SELECT source_type, cache_key, fetch_status, hit_count, "
+        "payload_size, expires_at, updated_at "
+        "FROM cache_entries ";
+    if (!source_type.empty()) {
+        sql += "WHERE source_type='" + sql_escape(source_type) + "' ";
+    }
+    sql += "ORDER BY updated_at DESC LIMIT " + std::to_string(limit) + ";";
+
+    Stmt s;
+    if (!prepare(db_, s, sql)) return json::array();
+    json arr = json::array();
+    while (sqlite3_step(s.p) == SQLITE_ROW) {
+        arr.push_back({
+            {"source_type", (const char*)sqlite3_column_text(s.p, 0)},
+            {"cache_key",   (const char*)sqlite3_column_text(s.p, 1)},
+            {"fetch_status",(const char*)sqlite3_column_text(s.p, 2)},
+            {"hit_count",   sqlite3_column_int(s.p, 3)},
+            {"payload_size",sqlite3_column_int64(s.p, 4)},
+            {"expires_at",  sqlite3_column_int64(s.p, 5)},
+            {"updated_at",  sqlite3_column_int64(s.p, 6)}
+        });
+    }
+    return arr;
+}
+
 // ── force_refresh_entity ────────────────────────────────────
 void CacheManager::force_refresh_entity(const std::string& entity_id,
                                           const std::string& source_id) {

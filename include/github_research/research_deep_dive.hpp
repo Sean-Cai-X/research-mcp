@@ -14,6 +14,10 @@
 //
 // 工具名: research_deep_dive
 //   参数: seed_query (string, 必选),
+//         mode (string, 可选): "auto"(默认) | "hn" | "general"
+//           - "auto": 有 WebView session 就走增强,没有就降级 general
+//           - "hn":   强制 HN 模式,需要 HN WebView session
+//           - "general": 通用模式,不依赖 HN,纯实体图谱遍历 + (可选)外部网页抓取
 //         max_secondary_links (int, 默认 5, 最大 15),
 //         page_text_max_chars (int, 默认 15000, 最大 50000),
 //         graph_max_depth (int, 默认 2, 最大 3),
@@ -30,7 +34,10 @@ namespace github_research {
 using json = nlohmann::json;
 
 // research_deep_dive 主入口
-// hn_session: 用于 HN 页面 + 次级网页抓取(WebView 可访问任意 URL)
-json ToolResearchDeepDive(WebViewSession& hn_session, const json& args);
+// web_session: 用于页面抓取的 WebView session,可为 null
+//   - null + mode=general → 跳过外部网页抓取,只用实体图谱 + 关键词扩展
+//   - 非 null → 可做次级网页抓取
+//   - mode=hn → 必须传入指向 HN 的 WebView session
+json ToolResearchDeepDive(WebViewSession* web_session, const json& args);
 
 } // namespace github_research

@@ -38,4 +38,12 @@ std::vector<WebSearchResult> bing_search(const std::string& query,
 std::vector<WebSearchResult> tavily_search(const std::string& query,
                                             int max_results = 8);
 
+// 查询当前可用的搜索引擎状态(给 ToolWebSearch 返回提示用)
+json web_search_engine_status();
+
+// 冻结缓存: 成功查询后存 / 全挂时回退
+void web_search_freeze_cache(const std::string& query,
+                              const std::vector<WebSearchResult>& results);
+json web_search_get_frozen(const std::string& query);
+
 } // namespace github_research

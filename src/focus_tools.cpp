@@ -85,17 +85,32 @@ json ToolFocusCreate(const json& args) {
     }
 
     // 如果没有 seed_entity_ids,尝试用 seed_queries 搜索现有实体
+    // 搜索不到的 query → 自动创建 concept 类型种子实体(支持"理论先行"场景)
+    std::vector<std::string> created_seeds;
     if (seed_entity_ids.empty() && !seed_queries.empty()) {
         for (const auto& q : seed_queries) {
             auto found = cm.search_entities(q, "", 0.0, 3);
-            for (const auto& e : found) {
-                seed_entity_ids.push_back(e.entity_id);
+            if (!found.empty()) {
+                for (const auto& e : found) {
+                    seed_entity_ids.push_back(e.entity_id);
+                }
+            } else {
+                // 降级:自动创建 concept 类型种子实体
+                std::vector<std::string> aliases;
+                std::vector<std::string> tags = {"auto_seed", "concept"};
+                json meta = {{"source", "focus_create_auto_seed"}, {"query", q}};
+                std::string eid = cm.register_entity("concept", q, aliases, tags, meta,
+                    "Auto-created seed for focus: " + name);
+                if (!eid.empty()) {
+                    seed_entity_ids.push_back(eid);
+                    created_seeds.push_back(q);
+                }
             }
         }
     }
 
     if (seed_entity_ids.empty()) {
-        return McpErrorFocus("ERROR: no seed entities found. Provide seed_entity_ids or seed_queries that match existing entities.");
+        return McpErrorFocus("ERROR: no seed entities found. Provide seed_entity_ids or seed_queries (will be auto-created as concept seeds).");
     }
 
     // 如果用户没给 keywords,从 description 做简单分词提取
@@ -119,8 +134,13 @@ json ToolFocusCreate(const json& args) {
         {"name", name},
         {"seed_entities", seed_entity_ids},
         {"keywords", keywords},
-        {"status", "active"}
+        {"status", "active"},
+        {"auto_created_seed_count", (int)created_seeds.size()}
     };
+    if (!created_seeds.empty()) {
+        result["auto_created_seeds"] = created_seeds;
+        result["message"] = "Some seed_queries were auto-created as concept seeds (not found in existing entities). This focus supports 'theory-first' creation.";
+    }
     return McpSuccessFocus(result);
 }
 
@@ -411,17 +431,47 @@ json ToolWebSearch(const json& args) {
     auto results = web_search(query, focus_id, max_results, freshness, mkt);
     json out = json::array();
     for (const auto& r : results) {
-        out.push_back({
+        json item = {
             {"title", r.title},
             {"url", r.url},
             {"snippet", r.snippet},
             {"source_engine", r.source_engine}
-        });
+        };
+        if (!r.content.empty()) item["content"] = r.content;
+        out.push_back(item);
     }
+
+    // 冻结缓存: 成功查到 → 存; 全挂 → 回退冻结
+    bool from_frozen = false;
+    if (!out.empty()) {
+        web_search_freeze_cache(query, results);
+    } else {
+        auto frozen = web_search_get_frozen(query);
+        if (!frozen.is_null() && frozen.is_array() && !frozen.empty()) {
+            out = frozen;
+            from_frozen = true;
+        }
+    }
+
     json result;
     result["query"] = query;
     result["count"] = (int)out.size();
     result["results"] = out;
+
+    // 引擎可用性状态 + 降级提示
+    json eng_status = web_search_engine_status();
+    result["engine_status"] = eng_status;
+
+    if (from_frozen) {
+        result["frozen_fallback"] = true;
+        result["stale"] = true;
+        result["warning"] = "All search engines returned empty. Using frozen cache from last successful query.";
+        result["suggestion"] = "Check network connectivity or proxy settings, then retry.";
+    } else if (out.empty()) {
+        result["warning"] = "No results found from any engine and no frozen cache available. "
+                          "Check proxy (HTTPS_PROXY / ALL_PROXY) or network connectivity.";
+        result["suggestion"] = "Try simpler keywords.";
+    }
     return McpSuccessFocus(result);
 }
 
