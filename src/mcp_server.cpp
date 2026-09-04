@@ -655,6 +655,41 @@ json McpServer::dispatch_wiki_tool(const std::string& tool_name, const json& arg
     try {
         if (tool_name == "wiki_discover") {
             auto res = wiki_explorer_->discover(args);
+
+            // 🔧 修复:本地源全部为空且有 query 时,自动 fallback 到 web_search
+            if (res["resources"].empty() &&
+                res.value("query", "").size() > 0) {
+                DBG_LOG("wiki") << "wiki_discover empty, falling back to web_search for: "
+                                << res["query"].get<std::string>();
+                json search_args = json::object();
+                search_args["query"] = res["query"];
+                search_args["max_results"] = 5;
+                json search_res = dispatch_focus_tool("web_search", search_args);
+
+                if (!search_res.value("isError", false) &&
+                    search_res.contains("content") && !search_res["content"].empty() &&
+                    search_res["content"][0].contains("text")) {
+                    try {
+                        auto search_text = json::parse(
+                            search_res["content"][0]["text"].get<std::string>());
+                        for (const auto& r : search_text.value("results", json::array())) {
+                            res["resources"].push_back({
+                                {"canonical_uri", r.value("url", "")},
+                                {"title", r.value("title", "")},
+                                {"resource_kind", "web_search"},
+                                {"source_id", r.value("source_engine", "web_search")},
+                                {"is_local", false},
+                                {"snippet", r.value("snippet", "")}
+                            });
+                        }
+                        res["warnings"].push_back(
+                            "wiki sources returned empty, auto-fell back to web_search");
+                    } catch (...) {
+                        DBG_LOG("wiki") << "web_search fallback parse failed";
+                    }
+                }
+            }
+
             return McpSuccess(res);
         }
         if (tool_name == "wiki_read") {
@@ -2372,7 +2407,85 @@ json McpServer::dispatch_focus_tool(const std::string& tool_name, const json& ar
     DBG_LOG("focus") << "dispatch_focus_tool: " << tool_name;
     try {
         // Focus 管理
-        if (tool_name == "focus_create")  return ToolFocusCreate(args);
+        if (tool_name == "focus_create") {
+            json result = ToolFocusCreate(args);
+
+            // 🔧 修复:如果种子实体找不到,且 seed_queries 里有 GitHub URL,
+            //    自动调 GitHub API 注册实体后重试
+            if (result.value("isError", false) &&
+                args.contains("seed_queries") && args["seed_queries"].is_array()) {
+                std::string err_text;
+                if (result.contains("content") && !result["content"].empty() &&
+                    result["content"][0].contains("text")) {
+                    err_text = result["content"][0]["text"].get<std::string>();
+                }
+                if (err_text.find("no seed entities found") != std::string::npos) {
+                    CacheManager& cm = CacheManager::instance();
+                    std::vector<std::string> auto_registered;
+
+                    for (const auto& q : args["seed_queries"]) {
+                        if (!q.is_string()) continue;
+                        std::string url = q.get<std::string>();
+
+                        // 解析 https://github.com/owner/repo[/...] 格式
+                        auto idx = url.find("github.com/");
+                        if (idx == std::string::npos) continue;
+                        auto rest = url.substr(idx + 11);
+                        auto slash1 = rest.find('/');
+                        if (slash1 == std::string::npos || slash1 == 0) continue;
+                        auto owner = rest.substr(0, slash1);
+                        auto slash2 = rest.find('/', slash1 + 1);
+                        auto repo = (slash2 == std::string::npos) ?
+                                    rest.substr(slash1 + 1) :
+                                    rest.substr(slash1 + 1, slash2 - slash1 - 1);
+                        if (owner.empty() || repo.empty()) continue;
+
+                        // 跳过 owner 里的 query/hash
+                        repo = repo.substr(0, repo.find('?'));
+                        repo = repo.substr(0, repo.find('#'));
+                        if (repo.empty()) continue;
+
+                        DBG_LOG("focus") << "auto-registering seed: github.com/"
+                                         << owner << "/" << repo;
+                        std::string canonical = owner + "/" + repo;
+                        json repo_info;
+                        std::string desc;
+                        try {
+                            repo_info = client_.get_repo_info(owner, repo);
+                            desc = repo_info.value("description", "");
+                        } catch (const std::exception& e) {
+                            // GitHub API 可能 403(无 token 或 rate limit),
+                            // 降级为仅注册基本实体,metadata 里标记 API 不可用
+                            DBG_LOG("focus") << "get_repo_info failed for "
+                                             << canonical << ": " << e.what()
+                                             << " (fallback to basic register)";
+                            repo_info = {
+                                {"owner", owner}, {"repo", repo},
+                                {"fallback", true}, {"source", "github_url_auto"}
+                            };
+                            desc = "(basic auto-registered from GitHub URL)";
+                        }
+                        try {
+                            std::string eid = cm.register_entity(
+                                "project", canonical, {}, {}, repo_info, desc);
+                            auto_registered.push_back(eid);
+                            DBG_LOG("focus") << "auto-registered entity " << eid;
+                        } catch (const std::exception& e) {
+                            DBG_LOG("focus") << "register_entity failed for "
+                                             << canonical << ": " << e.what();
+                        }
+                    }
+
+                    if (!auto_registered.empty()) {
+                        // 带 seed_entity_ids 重调
+                        json new_args = args;
+                        new_args["seed_entity_ids"] = auto_registered;
+                        result = ToolFocusCreate(new_args);
+                    }
+                }
+            }
+            return result;
+        }
         if (tool_name == "focus_list")    return ToolFocusList(args);
         if (tool_name == "focus_get")     return ToolFocusGet(args);
         if (tool_name == "focus_delete")  return ToolFocusDelete(args);
