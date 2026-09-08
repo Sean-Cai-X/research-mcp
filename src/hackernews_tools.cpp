@@ -1,4 +1,4 @@
-#include "github_research/hackernews_tools.hpp"
+﻿#include "github_research/hackernews_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/cache_manager.hpp"
@@ -177,7 +177,7 @@ static json convert_firebase_item_to_story(const json& fb_item, int rank) {
 
 // Firebase 优先 + WebView2 兜底
 static json fetch_stories_with_fallback(
-    WebViewSession& session, const std::string& source, int count) {
+    IBrowserSession& session, const std::string& source, int count) {
 
     std::cerr << "[hn] attempting Firebase API first (source=" << source << ")" << std::endl;
     json ids;
@@ -216,10 +216,10 @@ static json fetch_stories_with_fallback(
     // 兜底 WebView2(仅当 session 已初始化时)
     if (session.IsReady()) {
         std::cerr << "[hn] Firebase API failed/empty, falling back to WebView2 scrape" << std::endl;
-        std::wstring url;
-        if (source == "new")           url = L"https://news.ycombinator.com/newest";
-        else if (source == "best")     url = L"https://news.ycombinator.com/best";
-        else                           url = L"https://news.ycombinator.com/";
+        std::string url;
+        if (source == "new")           url = "https://news.ycombinator.com/newest";
+        else if (source == "best")     url = "https://news.ycombinator.com/best";
+        else                           url = "https://news.ycombinator.com/";
 
         json raw = NavigateAndExecuteRaw(session, url, kJsHnIndexList, kLogPrefix, 4000, 45000);
         if (raw.is_array()) return raw;
@@ -238,7 +238,7 @@ static json fetch_stories_with_fallback(
 // ============================================================
 
 // 1. hn_get_topstories
-json ToolHnGetTopStories(WebViewSession& session, const json& args) {
+json ToolHnGetTopStories(IBrowserSession& session, const json& args) {
     int count = 20;
     if (args.contains("count") && args["count"].is_number_integer()) {
         count = args["count"].get<int>();
@@ -271,7 +271,7 @@ json ToolHnGetTopStories(WebViewSession& session, const json& args) {
 }
 
 // 2. hn_get_new_stories
-json ToolHnGetNewStories(WebViewSession& session, const json& args) {
+json ToolHnGetNewStories(IBrowserSession& session, const json& args) {
     int count = 20;
     if (args.contains("count") && args["count"].is_number_integer()) {
         count = args["count"].get<int>();
@@ -303,7 +303,7 @@ json ToolHnGetNewStories(WebViewSession& session, const json& args) {
 }
 
 // 3. hn_get_best_stories
-json ToolHnGetBestStories(WebViewSession& session, const json& args) {
+json ToolHnGetBestStories(IBrowserSession& session, const json& args) {
     int count = 20;
     if (args.contains("count") && args["count"].is_number_integer()) {
         count = args["count"].get<int>();
@@ -335,7 +335,7 @@ json ToolHnGetBestStories(WebViewSession& session, const json& args) {
 }
 
 // 4. hn_get_item
-json ToolHnGetItem(WebViewSession& session, const json& args) {
+json ToolHnGetItem(IBrowserSession& session, const json& args) {
     int id = 0;
     if (args.contains("id") && args["id"].is_number_integer()) {
         id = args["id"].get<int>();
@@ -352,13 +352,13 @@ json ToolHnGetItem(WebViewSession& session, const json& args) {
     }
 
     std::string urlStr = "https://news.ycombinator.com/item?id=" + std::to_string(id);
-    std::wstring url = to_wstring(urlStr);
+    std::string url = urlStr;
 
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[hn]", 2500, 30000);
 }
 
 // 5. hn_search_by_keyword
-json ToolHnSearchByKeyword(WebViewSession& session, const json& args) {
+json ToolHnSearchByKeyword(IBrowserSession& session, const json& args) {
     std::string query;
     int count = 10;
 
@@ -377,7 +377,7 @@ json ToolHnSearchByKeyword(WebViewSession& session, const json& args) {
 
     std::string encoded = UrlEncodeComponent(query);
     std::string urlStr = "https://hn.algolia.com/?q=" + encoded;
-    std::wstring url = to_wstring(urlStr);
+    std::string url = urlStr;
 
     // Algolia 是 React SPA,等待时间稍长
     json result = NavigateAndExecute(session, url, kJsExtractRawPage, "[hn]", 3000, 30000);
@@ -390,7 +390,7 @@ json ToolHnSearchByKeyword(WebViewSession& session, const json& args) {
 // 6. hn_get_latest_index - 轻量索引(结构化,无深度请求)
 // ============================================================
 // Firebase API 优先,WebView2 兜底
-json ToolHnGetLatestIndex(WebViewSession& session, const json& args) {
+json ToolHnGetLatestIndex(IBrowserSession& session, const json& args) {
     int limit = 30;
     if (args.contains("limit") && args["limit"].is_number_integer()) {
         limit = args["limit"].get<int>();
@@ -438,7 +438,7 @@ json ToolHnGetLatestIndex(WebViewSession& session, const json& args) {
 //   1. 导航 HN item 页,提取 title/source_url/comments
 //   2. (可选)导航 source_url,用 kJsExtractRawPage 取正文
 //   3. C++ 合并结构化结果,按 max_comment_count/comment_max_depth 过滤
-json ToolHnFetchDetailedStory(WebViewSession& session, const json& args) {
+json ToolHnFetchDetailedStory(IBrowserSession& session, const json& args) {
     // --- 参数解析 ---
     std::string hnId;
     if (args.contains("hn_id")) {
@@ -507,7 +507,7 @@ json ToolHnFetchDetailedStory(WebViewSession& session, const json& args) {
 
     // --- 步骤1: 导航 HN item 页,提取 title/source_url/comments ---
     std::string itemUrlStr = "https://news.ycombinator.com/item?id=" + hnId;
-    std::wstring itemUrl = to_wstring(itemUrlStr);
+    std::string itemUrl = itemUrlStr;
 
     // 注意: 如果不抓取评论,仍可只取 title/source_url;但 JS 一次性返回,无额外开销
     json itemRaw = NavigateAndExecuteRaw(session, itemUrl, kJsHnItemDetail, kLogPrefix, 2500, 30000);
@@ -552,7 +552,7 @@ json ToolHnFetchDetailedStory(WebViewSession& session, const json& args) {
     bool isExternal = !sourceUrl.empty() &&
                       sourceUrl.find("news.ycombinator.com") == std::string::npos;
     if (fetchArticle && isExternal) {
-        std::wstring extUrl = to_wstring(sourceUrl);
+        std::string extUrl = sourceUrl;
         // 外部站点(尤其 GitHub Pages / 博客 / 文档站)页面渲染差异大,
         // 采用递进式抓取:先常规等待,失败后用更长等待时间重试
         struct Attempt { int wait_ms; uint32_t nav_timeout_ms; };

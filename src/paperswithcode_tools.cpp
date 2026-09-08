@@ -1,4 +1,4 @@
-#include "github_research/paperswithcode_tools.hpp"
+﻿#include "github_research/paperswithcode_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/cache_manager.hpp"
@@ -19,7 +19,7 @@ namespace {
 // 1. ToolPwcSearchPapers
 // args: query (string), count (int, default 10)
 // ============================================================
-json ToolPwcSearchPapers(WebViewSession& session, const json& args) {
+json ToolPwcSearchPapers(IBrowserSession& session, const json& args) {
     std::string query;
     int count = 10;
 
@@ -35,7 +35,7 @@ json ToolPwcSearchPapers(WebViewSession& session, const json& args) {
     if (count > 50) count = 50;
 
     std::string encoded = UrlEncodeComponent(query);
-    std::wstring url = to_wstring("https://paperswithcode.com/search?q=" + encoded);
+    std::string url = "https://paperswithcode.com/search?q=" + encoded;
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pwc]", 2500);
@@ -45,7 +45,7 @@ json ToolPwcSearchPapers(WebViewSession& session, const json& args) {
 // 2. ToolPwcGetPaperDetail
 // args: paper_id (string)
 // ============================================================
-json ToolPwcGetPaperDetail(WebViewSession& session, const json& args) {
+json ToolPwcGetPaperDetail(IBrowserSession& session, const json& args) {
     std::string paperId;
     if (args.contains("paper_id") && args["paper_id"].is_string())
         paperId = args["paper_id"].get<std::string>();
@@ -54,7 +54,7 @@ json ToolPwcGetPaperDetail(WebViewSession& session, const json& args) {
         return McpError("ERROR: [pwc] 'paper_id' parameter is required");
     }
 
-    std::wstring url = to_wstring("https://paperswithcode.com/paper/" + paperId);
+    std::string url = "https://paperswithcode.com/paper/" + paperId;
     // 统一返回原始页面文本,解析交给 AI
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pwc]", 2500);
 }
@@ -63,7 +63,7 @@ json ToolPwcGetPaperDetail(WebViewSession& session, const json& args) {
 // 3. ToolPwcGetSota
 // args: task (string), count (int, default 20)
 // ============================================================
-json ToolPwcGetSota(WebViewSession& session, const json& args) {
+json ToolPwcGetSota(IBrowserSession& session, const json& args) {
     std::string task;
     int count = 20;
 
@@ -85,7 +85,7 @@ json ToolPwcGetSota(WebViewSession& session, const json& args) {
     }
     slug = UrlEncodeComponent(slug);
 
-    std::wstring url = to_wstring("https://paperswithcode.com/sota/task/" + slug);
+    std::string url = "https://paperswithcode.com/sota/task/" + slug;
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pwc]", 2500);
@@ -95,7 +95,7 @@ json ToolPwcGetSota(WebViewSession& session, const json& args) {
 // 4. ToolPwcSearchTasks
 // args: query (string)
 // ============================================================
-json ToolPwcSearchTasks(WebViewSession& session, const json& args) {
+json ToolPwcSearchTasks(IBrowserSession& session, const json& args) {
     std::string query;
     if (args.contains("query") && args["query"].is_string())
         query = args["query"].get<std::string>();
@@ -106,7 +106,7 @@ json ToolPwcSearchTasks(WebViewSession& session, const json& args) {
 
     std::string encoded = UrlEncodeComponent(query);
     // 任务检索: 直接访问 /task/ENCODED(slug 形式)
-    std::wstring url = to_wstring("https://paperswithcode.com/task/" + encoded);
+    std::string url = "https://paperswithcode.com/task/" + encoded;
     // 统一返回原始页面文本,解析交给 AI
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pwc]", 2500);
 }
@@ -115,7 +115,7 @@ json ToolPwcSearchTasks(WebViewSession& session, const json& args) {
 // 5. ToolPwcSearchDatasets
 // args: query (string), count (int, default 10)
 // ============================================================
-json ToolPwcSearchDatasets(WebViewSession& session, const json& args) {
+json ToolPwcSearchDatasets(IBrowserSession& session, const json& args) {
     std::string query;
     int count = 10;
 
@@ -131,7 +131,7 @@ json ToolPwcSearchDatasets(WebViewSession& session, const json& args) {
     if (count > 50) count = 50;
 
     std::string encoded = UrlEncodeComponent(query);
-    std::wstring url = to_wstring("https://paperswithcode.com/datasets?q=" + encoded);
+    std::string url = "https://paperswithcode.com/datasets?q=" + encoded;
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pwc]", 2500);
@@ -143,7 +143,7 @@ json ToolPwcSearchDatasets(WebViewSession& session, const json& args) {
 //    cache_key: pwc:{paper_id}, TTL=72h
 //    entity: paper 实体 + evaluated_on(task) 关系 + stars 时间快照
 // ============================================================
-json ToolPwcFetchPaperDetail(WebViewSession& session, const json& args) {
+json ToolPwcFetchPaperDetail(IBrowserSession& session, const json& args) {
     std::string paperId;
     if (args.contains("paper_id") && args["paper_id"].is_string()) {
         paperId = args["paper_id"].get<std::string>();
@@ -171,7 +171,7 @@ json ToolPwcFetchPaperDetail(WebViewSession& session, const json& args) {
         }
     }
 
-    std::wstring url = to_wstring("https://paperswithcode.com/paper/" + paperId);
+    std::string url = "https://paperswithcode.com/paper/" + paperId;
     json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage, "[pwc]", 2500, 30000);
     if (raw.is_null()) {
         if (cm.is_ready()) {

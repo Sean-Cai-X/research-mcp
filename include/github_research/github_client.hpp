@@ -6,7 +6,9 @@
 #include <memory>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#ifdef RESEARCH_MCP_USE_WEBVIEW2
 #include "webview_client.hpp"
+#endif
 #include "curl_http_client.hpp"
 #include "errors.hpp"
 
@@ -24,7 +26,9 @@ public:
     // HTTP 后端选择
     enum class Backend {
         Curl,      // libcurl:纯 HTTP,无浏览器依赖,适用于 GitHub REST API(默认)
+#ifdef RESEARCH_MCP_USE_WEBVIEW2
         WebView2   // WebView2:浏览器内核,适用于需要 JS 渲染/浏览器指纹的场景
+#endif
     };
 
     explicit GitHubClient(std::optional<std::string> token = std::nullopt,
@@ -255,9 +259,11 @@ public:
     // 用于 8 源会话隔离,避免与其他源共用默认路径导致 0x800700aa
     void set_user_data_dir(const std::string& dir) {
         user_data_dir_ = dir;
+#ifdef RESEARCH_MCP_USE_WEBVIEW2
         if (backend_ == Backend::WebView2) {
             static_cast<WebViewClient*>(http_client_.get())->set_user_data_dir(dir);
         }
+#endif
     }
 
     // 当前使用的后端名称("libcurl" 或 "webview2")

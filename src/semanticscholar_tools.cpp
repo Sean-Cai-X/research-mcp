@@ -19,7 +19,7 @@ namespace {
 // 1. s2_search_papers - 论文检索
 // args: query (string) / count (int, default 10) / year (string, optional, e.g. "2020-2024")
 // ============================================================
-json ToolS2SearchPapers(WebViewSession& session, const json& args) {
+json ToolS2SearchPapers(IBrowserSession& session, const json& args) {
     std::string query;
     int count = 10;
     std::string year;
@@ -46,14 +46,14 @@ json ToolS2SearchPapers(WebViewSession& session, const json& args) {
     (void)count;
 
     std::wcout << L"[s2] search papers: " << to_wstring(query) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 2500, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 2500, 45000);
 }
 
 // ============================================================
 // 2. s2_get_paper_detail - 论文详情
 // args: paper_id (string) - 支持 DOI / corpus ID / arXiv ID
 // ============================================================
-json ToolS2GetPaperDetail(WebViewSession& session, const json& args) {
+json ToolS2GetPaperDetail(IBrowserSession& session, const json& args) {
     std::string paperId;
     if (args.contains("paper_id") && args["paper_id"].is_string())
         paperId = args["paper_id"].get<std::string>();
@@ -64,14 +64,14 @@ json ToolS2GetPaperDetail(WebViewSession& session, const json& args) {
 
     std::string url = "https://www.semanticscholar.org/paper/" + UrlEncodeComponent(paperId);
     std::wcout << L"[s2] get paper detail: " << to_wstring(paperId) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 2500, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 2500, 45000);
 }
 
 // ============================================================
 // 3. s2_get_citations - 获取引用该论文的论文列表
 // args: paper_id (string) / count (int, default 20)
 // ============================================================
-json ToolS2GetCitations(WebViewSession& session, const json& args) {
+json ToolS2GetCitations(IBrowserSession& session, const json& args) {
     std::string paperId;
     int count = 20;
     if (args.contains("paper_id") && args["paper_id"].is_string())
@@ -89,14 +89,14 @@ json ToolS2GetCitations(WebViewSession& session, const json& args) {
     std::string url = "https://www.semanticscholar.org/paper/" +
                       UrlEncodeComponent(paperId) + "#cited-papers";
     std::wcout << L"[s2] get citations: " << to_wstring(paperId) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 3000, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 3000, 45000);
 }
 
 // ============================================================
 // 4. s2_get_references - 获取该论文引用的参考文献列表
 // args: paper_id (string) / count (int, default 20)
 // ============================================================
-json ToolS2GetReferences(WebViewSession& session, const json& args) {
+json ToolS2GetReferences(IBrowserSession& session, const json& args) {
     std::string paperId;
     int count = 20;
     if (args.contains("paper_id") && args["paper_id"].is_string())
@@ -114,14 +114,14 @@ json ToolS2GetReferences(WebViewSession& session, const json& args) {
     std::string url = "https://www.semanticscholar.org/paper/" +
                       UrlEncodeComponent(paperId) + "#references";
     std::wcout << L"[s2] get references: " << to_wstring(paperId) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 3000, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 3000, 45000);
 }
 
 // ============================================================
 // 5. s2_get_author_papers - 获取作者论文列表及作者元信息
 // args: author_id (string) / count (int, default 20)
 // ============================================================
-json ToolS2GetAuthorPapers(WebViewSession& session, const json& args) {
+json ToolS2GetAuthorPapers(IBrowserSession& session, const json& args) {
     std::string authorId;
     int count = 20;
     if (args.contains("author_id") && args["author_id"].is_string())
@@ -138,14 +138,14 @@ json ToolS2GetAuthorPapers(WebViewSession& session, const json& args) {
 
     std::string url = "https://www.semanticscholar.org/author/" + UrlEncodeComponent(authorId);
     std::wcout << L"[s2] get author papers: " << to_wstring(authorId) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 3000, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 3000, 45000);
 }
 
 // ============================================================
 // 6. s2_search_author - 作者检索
 // args: name (string) / count (int, default 5)
 // ============================================================
-json ToolS2SearchAuthor(WebViewSession& session, const json& args) {
+json ToolS2SearchAuthor(IBrowserSession& session, const json& args) {
     std::string name;
     int count = 5;
     if (args.contains("name") && args["name"].is_string())
@@ -164,7 +164,7 @@ json ToolS2SearchAuthor(WebViewSession& session, const json& args) {
     std::string url = "https://www.semanticscholar.org/search?q=" + encoded +
                       "&sort=relevance&type=author";
     std::wcout << L"[s2] search author: " << to_wstring(name) << std::endl;
-    return NavigateAndExecute(session, to_wstring(url), kJsExtractRawPage, "[s2]", 2500, 45000);
+    return NavigateAndExecute(session, url, kJsExtractRawPage, "[s2]", 2500, 45000);
 }
 
 // ============================================================
@@ -173,7 +173,7 @@ json ToolS2SearchAuthor(WebViewSession& session, const json& args) {
 //    cache_key: s2:{paper_id}, TTL=72h
 //    entity: paper 实体 + cites/reference 关系 + citations 时间快照
 // ============================================================
-json ToolS2FetchPaperDetail(WebViewSession& session, const json& args) {
+json ToolS2FetchPaperDetail(IBrowserSession& session, const json& args) {
     std::string paperId;
     if (args.contains("paper_id") && args["paper_id"].is_string()) {
         paperId = args["paper_id"].get<std::string>();
@@ -203,7 +203,7 @@ json ToolS2FetchPaperDetail(WebViewSession& session, const json& args) {
 
     std::string url = "https://www.semanticscholar.org/paper/" + UrlEncodeComponent(paperId);
     std::wcout << L"[s2] fetch paper detail: " << to_wstring(paperId) << std::endl;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                       "[s2]", 2500, 45000);
     if (raw.is_null()) {
         if (cm.is_ready()) {

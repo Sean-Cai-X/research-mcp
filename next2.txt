@@ -780,12 +780,7 @@ bool init(const std::string& userDataDir,
   - 加 #include <codecvt> <locale>
 
 # 即将编译验证
-
-跑完整 Release 构建：
-`
-cmake --build build-rel --config Release --target research-mcp
-`
-如果还有 error C2664/C2447 之类，按编译器提示继续修剩余调用点（可能还有其他 .cpp 直接调 WebViewSession::Navigate/Init）。
+ Release 构建完成
 
 # 剩余 Phase (按 next2.txt 规划顺序)
 

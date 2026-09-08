@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <optional>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include "github_client.hpp"
-#include "webview_session.hpp"
+#include "github_research/browser_session.hpp"
 #include "datasource_registry.hpp"
 #include "wiki_explorer.hpp"
 #include "kiwix_source.hpp"
@@ -57,31 +57,31 @@ public:
     // ============ 各源 WebView 会话初始化(可选,按需启动) ============
     // 每个源使用独立 UserData 目录,Cookie/缓存完全隔离
 
-    bool init_arxiv(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_arxiv(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_arxiv();
     bool has_arxiv() const { return arxiv_session_ != nullptr; }
 
-    bool init_hackernews(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_hackernews(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_hackernews();
     bool has_hackernews() const { return hn_session_ != nullptr; }
 
-    bool init_package(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_package(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_package();
     bool has_package() const { return pkg_session_ != nullptr; }
 
-    bool init_paperswithcode(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_paperswithcode(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_paperswithcode();
     bool has_paperswithcode() const { return pwc_session_ != nullptr; }
 
-    bool init_huggingface(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_huggingface(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_huggingface();
     bool has_huggingface() const { return hf_session_ != nullptr; }
 
-    bool init_semanticscholar(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_semanticscholar(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_semanticscholar();
     bool has_semanticscholar() const { return s2_session_ != nullptr; }
 
-    bool init_stackoverflow(const std::wstring& userDataDir, const std::string& proxy_url = "");
+    bool init_stackoverflow(const std::string& userDataDir, const std::string& proxy_url = "");
     void shutdown_stackoverflow();
     bool has_stackoverflow() const { return so_session_ != nullptr; }
 
@@ -123,11 +123,11 @@ private:
     void init_datasource_registry();
 
     // 通用 init/shutdown 辅助
-    bool init_session(std::unique_ptr<WebViewSession>& session,
-                      const std::wstring& userDataDir,
+    bool init_session(std::unique_ptr<IBrowserSession>& session,
+                      const std::string& userDataDir,
                       const std::string& proxy_url,
                       const char* logName);
-    void shutdown_session(std::unique_ptr<WebViewSession>& session, const char* logName);
+    void shutdown_session(std::unique_ptr<IBrowserSession>& session, const char* logName);
 
     // 懒加载:首次 tool 调用时按 profile 路径初始化对应会话
     // 返回 false 表示该源未配置 profile 或初始化失败
@@ -146,13 +146,13 @@ private:
     GitHubClient client_;
 
     // 8 源独立 WebView 会话(按需初始化,未 init 时为 nullptr)
-    std::unique_ptr<WebViewSession> arxiv_session_;
-    std::unique_ptr<WebViewSession> hn_session_;
-    std::unique_ptr<WebViewSession> pkg_session_;
-    std::unique_ptr<WebViewSession> pwc_session_;
-    std::unique_ptr<WebViewSession> hf_session_;
-    std::unique_ptr<WebViewSession> s2_session_;
-    std::unique_ptr<WebViewSession> so_session_;
+    std::unique_ptr<IBrowserSession> arxiv_session_;
+    std::unique_ptr<IBrowserSession> hn_session_;
+    std::unique_ptr<IBrowserSession> pkg_session_;
+    std::unique_ptr<IBrowserSession> pwc_session_;
+    std::unique_ptr<IBrowserSession> hf_session_;
+    std::unique_ptr<IBrowserSession> s2_session_;
+    std::unique_ptr<IBrowserSession> so_session_;
 
     std::string proxy_url_;
     std::string github_profile_dir_;  // GitHub 后端独立 user data dir

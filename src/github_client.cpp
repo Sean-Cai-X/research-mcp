@@ -92,8 +92,10 @@ GitHubClient::GitHubClient(std::optional<std::string> token, int timeout_seconds
     : timeout_seconds_(timeout_seconds), backend_(backend) {
     if (backend_ == Backend::Curl) {
         http_client_ = std::make_unique<CurlHttpClient>("Deep-Research-Bot/1.0", timeout_seconds);
+#ifdef RESEARCH_MCP_USE_WEBVIEW2
     } else {
         http_client_ = std::make_unique<WebViewClient>("Deep-Research-Bot/1.0", timeout_seconds, true);
+#endif
     }
     headers_["Accept"] = "application/vnd.github.v3+json";
     headers_["User-Agent"] = "Deep-Research-Bot/1.0";

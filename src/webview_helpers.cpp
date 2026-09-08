@@ -40,8 +40,8 @@ json WrapMcpResult(const json& payload) {
     };
 }
 
-json NavigateAndExecute(WebViewSession& session,
-                        const std::wstring& url,
+json NavigateAndExecute(IBrowserSession& session,
+                        const std::string& url,
                         const std::string& js,
                         const char* logPrefix,
                         int waitMs,
@@ -58,8 +58,8 @@ json NavigateAndExecute(WebViewSession& session,
 
 // 与 NavigateAndExecute 相同流程,但返回原始 JSON payload(不包装 MCP content)
 // 失败时返回 null json
-json NavigateAndExecuteRaw(WebViewSession& session,
-                           const std::wstring& url,
+json NavigateAndExecuteRaw(IBrowserSession& session,
+                           const std::string& url,
                            const std::string& js,
                            const char* logPrefix,
                            int waitMs,
@@ -69,14 +69,9 @@ json NavigateAndExecuteRaw(WebViewSession& session,
         return std::chrono::duration_cast<std::chrono::milliseconds>(
                    std::chrono::steady_clock::now() - t0).count();
     };
-    {
-        std::string url_narrow;
-        url_narrow.reserve(url.size());
-        for (wchar_t wc : url) { url_narrow.push_back(static_cast<char>(wc & 0xFF)); }
-        std::cerr << logPrefix << " [dbg] NavigateAndExecuteRaw START url="
-                  << url_narrow
-                  << " waitMs=" << waitMs << " navTimeout=" << navTimeoutMs << std::endl;
-    }
+    std::cerr << logPrefix << " [dbg] NavigateAndExecuteRaw START url="
+              << url
+              << " waitMs=" << waitMs << " navTimeout=" << navTimeoutMs << std::endl;
 
     if (!session.IsReady()) {
         std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms session not ready" << std::endl;
@@ -84,16 +79,7 @@ json NavigateAndExecuteRaw(WebViewSession& session,
     }
     std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms session ready, calling Navigate" << std::endl;
 
-    // wstring → UTF-8 (WebViewSession::Navigate 接口用 UTF-8)
-    std::string url_utf8;
-    try {
-        std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
-        url_utf8 = conv.to_bytes(url);
-    } catch (...) {
-        url_utf8 = std::string(url.begin(), url.end());
-    }
-
-    if (!session.Navigate(url_utf8)) {
+    if (!session.Navigate(url)) {
         std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate failed" << std::endl;
         return nullptr;
     }

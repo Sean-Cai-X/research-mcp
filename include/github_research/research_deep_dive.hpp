@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // DeepDive 工具: 基于图谱的次级链接发现 + 批量网页抓取 + 综合分析上下文
 //
@@ -27,7 +27,7 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
-#include "webview_session.hpp"
+#include "github_research/browser_session.hpp"
 
 namespace github_research {
 
@@ -38,6 +38,6 @@ using json = nlohmann::json;
 //   - null + mode=general → 跳过外部网页抓取,只用实体图谱 + 关键词扩展
 //   - 非 null → 可做次级网页抓取
 //   - mode=hn → 必须传入指向 HN 的 WebView session
-json ToolResearchDeepDive(WebViewSession* web_session, const json& args);
+json ToolResearchDeepDive(IBrowserSession* web_session, const json& args);
 
 } // namespace github_research

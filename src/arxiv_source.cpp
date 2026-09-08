@@ -101,7 +101,7 @@ std::string cleanArxivId(const std::string& raw) {
 // Example: arxiv://2401.12345
 // =============================================================
 
-ArxivSource::ArxivSource(WebViewSession* session)
+ArxivSource::ArxivSource(IBrowserSession* session)
     : session_(session) {}
 
 bool ArxivSource::healthCheck() {
@@ -116,7 +116,7 @@ std::vector<SearchResult> ArxivSource::search(const SearchQuery& query) {
     std::string encoded = UrlEncodeComponent(query.query);
     std::string url_str = "https://arxiv.org/search/?query=" + encoded +
                           "&searchtype=all&start=0";
-    std::wstring url = to_wstring(url_str);
+    std::string url = url_str;
 
     json raw = NavigateAndExecuteRaw(*session_, url, kJsArxivSearchIndex,
                                      kLogPrefix, 2500, 30000);
@@ -158,7 +158,7 @@ std::optional<FetchResult> ArxivSource::fetch(const std::string& canonical_uri) 
     if (arxiv_id.empty()) return std::nullopt;
 
     std::string url_str = "https://arxiv.org/abs/" + arxiv_id;
-    std::wstring url = to_wstring(url_str);
+    std::string url = url_str;
 
     json raw = NavigateAndExecuteRaw(*session_, url, kJsExtractRawPage,
                                      kLogPrefix, 2000, 30000);

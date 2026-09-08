@@ -11,7 +11,7 @@ namespace github_research {
 // This is a fetch-only source; search() returns empty.
 // =============================================================
 
-WebCrawlerSource::WebCrawlerSource(WebViewSession* session)
+WebCrawlerSource::WebCrawlerSource(IBrowserSession* session)
     : session_(session) {}
 
 bool WebCrawlerSource::healthCheck() {
@@ -46,7 +46,7 @@ std::optional<FetchResult> WebCrawlerSource::fetch(const std::string& canonical_
     // Navigate + execute the unified raw-page extraction JS.
     json raw = NavigateAndExecuteRaw(
         *session_,
-        std::wstring(url.begin(), url.end()),
+        url,
         kJsExtractRawPage,
         "[web_crawler]");
 

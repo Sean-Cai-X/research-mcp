@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // WebViewSession 公共辅助函数
 // 所有 API 数据源工具集共用:导航 + 等待 + 执行 JS + 解析结果
@@ -6,7 +6,7 @@
 
 #include <string>
 #include <nlohmann/json.hpp>
-#include "webview_session.hpp"
+#include "github_research/browser_session.hpp"
 
 namespace github_research {
 
@@ -24,8 +24,7 @@ json WrapMcpResult(const json& payload);
 // logPrefix:  日志前缀(如 "[hn]" "[pwc]" "[hf]")
 // waitMs:     导航完成后额外等待 DOM 渲染的毫秒数
 // navTimeoutMs: 导航超时
-json NavigateAndExecute(WebViewSession& session,
-                        const std::wstring& url,
+json NavigateAndExecute(IBrowserSession& session, const std::string& url,
                         const std::string& js,
                         const char* logPrefix = "",
                         int waitMs = 2000,
@@ -34,8 +33,7 @@ json NavigateAndExecute(WebViewSession& session,
 // 与 NavigateAndExecute 相同流程,但返回解析后的原始 JSON payload(不包装 MCP content)
 // 用于需要多次导航后合并结构化结果的场景(如 hn_fetch_detailed_story)
 // 失败时返回 null json(is_null() == true)
-json NavigateAndExecuteRaw(WebViewSession& session,
-                           const std::wstring& url,
+json NavigateAndExecuteRaw(IBrowserSession& session, const std::string& url,
                            const std::string& js,
                            const char* logPrefix = "",
                            int waitMs = 2000,

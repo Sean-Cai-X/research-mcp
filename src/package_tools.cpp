@@ -1,4 +1,4 @@
-#include "github_research/package_tools.hpp"
+﻿#include "github_research/package_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/cache_manager.hpp"
@@ -36,7 +36,7 @@ int read_count(const json& args, const std::string& key, int default_val) {
 // ============================================================
 // 1. pkg_search_npm
 // ============================================================
-json ToolPkgSearchNpm(WebViewSession& session, const json& args) {
+json ToolPkgSearchNpm(IBrowserSession& session, const json& args) {
     std::string query = read_string(args, "query");
     if (query.empty()) {
         return McpError("ERROR: [pkg] 'query' parameter is required");
@@ -45,27 +45,27 @@ json ToolPkgSearchNpm(WebViewSession& session, const json& args) {
     (void)count;  // 统一返回原始页面文本,解析交给 AI
 
     std::string encoded = UrlEncodeComponent(query);
-    std::wstring url = to_wstring("https://www.npmjs.com/search?q=" + encoded);
+    std::string url = "https://www.npmjs.com/search?q=" + encoded;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pkg]", 2500, 30000);
 }
 
 // ============================================================
 // 2. pkg_get_npm_detail
 // ============================================================
-json ToolPkgGetNpmDetail(WebViewSession& session, const json& args) {
+json ToolPkgGetNpmDetail(IBrowserSession& session, const json& args) {
     std::string name = read_string(args, "name");
     if (name.empty()) {
         return McpError("ERROR: [pkg] 'name' parameter is required");
     }
 
-    std::wstring url = to_wstring("https://www.npmjs.com/package/" + name);
+    std::string url = "https://www.npmjs.com/package/" + name;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pkg]", 2500, 30000);
 }
 
 // ============================================================
 // 3. pkg_search_pypi
 // ============================================================
-json ToolPkgSearchPypi(WebViewSession& session, const json& args) {
+json ToolPkgSearchPypi(IBrowserSession& session, const json& args) {
     std::string query = read_string(args, "query");
     if (query.empty()) {
         return McpError("ERROR: [pkg] 'query' parameter is required");
@@ -74,20 +74,20 @@ json ToolPkgSearchPypi(WebViewSession& session, const json& args) {
     (void)count;  // 统一返回原始页面文本,解析交给 AI
 
     std::string encoded = UrlEncodeComponent(query);
-    std::wstring url = to_wstring("https://pypi.org/search/?q=" + encoded);
+    std::string url = "https://pypi.org/search/?q=" + encoded;
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pkg]", 2500, 30000);
 }
 
 // ============================================================
 // 4. pkg_get_pypi_detail
 // ============================================================
-json ToolPkgGetPypiDetail(WebViewSession& session, const json& args) {
+json ToolPkgGetPypiDetail(IBrowserSession& session, const json& args) {
     std::string name = read_string(args, "name");
     if (name.empty()) {
         return McpError("ERROR: [pkg] 'name' parameter is required");
     }
 
-    std::wstring url = to_wstring("https://pypi.org/project/" + name + "/");
+    std::string url = "https://pypi.org/project/" + name + "/";
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[pkg]", 2500, 30000);
 }
 
@@ -97,7 +97,7 @@ json ToolPkgGetPypiDetail(WebViewSession& session, const json& args) {
 //    cache_key: pkg:{registry}:{name}, TTL=24h
 //    entity: package 实体 + authored_by(owner) 关系 + weekly_downloads 时间快照
 // ============================================================
-json ToolPkgFetchDetail(WebViewSession& session, const json& args) {
+json ToolPkgFetchDetail(IBrowserSession& session, const json& args) {
     std::string registry = read_string(args, "registry");
     std::string name = read_string(args, "name");
     if (registry.empty()) {
@@ -136,7 +136,7 @@ json ToolPkgFetchDetail(WebViewSession& session, const json& args) {
     } else {
         url_str = "https://pypi.org/project/" + name + "/";
     }
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url_str),
+    json raw = NavigateAndExecuteRaw(session, url_str,
                                       kJsExtractRawPage, "[pkg]", 2500, 30000);
     if (raw.is_null()) {
         if (cm.is_ready()) {

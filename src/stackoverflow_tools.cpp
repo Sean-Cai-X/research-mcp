@@ -1,4 +1,4 @@
-#include "github_research/stackoverflow_tools.hpp"
+﻿#include "github_research/stackoverflow_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/cache_manager.hpp"
@@ -63,7 +63,7 @@ std::string BuildTaggedPath(const std::string& tags) {
 // ============================================================
 // 1. so_search_questions
 // ============================================================
-json ToolSoSearchQuestions(WebViewSession& session, const json& args) {
+json ToolSoSearchQuestions(IBrowserSession& session, const json& args) {
     if (!args.contains("query") || !args["query"].is_string() ||
         args["query"].get<std::string>().empty()) {
         return McpError("ERROR: 'query' parameter is required");
@@ -93,7 +93,7 @@ json ToolSoSearchQuestions(WebViewSession& session, const json& args) {
         urlStr += "&tagged=" + UrlEncodeComponent(tag);
     }
 
-    std::wstring url = to_wstring(urlStr);
+    std::string url = urlStr;
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
@@ -102,7 +102,7 @@ json ToolSoSearchQuestions(WebViewSession& session, const json& args) {
 // ============================================================
 // 2. so_get_question_detail
 // ============================================================
-json ToolSoGetQuestionDetail(WebViewSession& session, const json& args) {
+json ToolSoGetQuestionDetail(IBrowserSession& session, const json& args) {
     if (!args.contains("question_id") || !args["question_id"].is_number_integer()) {
         return McpError("ERROR: 'question_id' parameter is required");
     }
@@ -111,8 +111,8 @@ json ToolSoGetQuestionDetail(WebViewSession& session, const json& args) {
         return McpError("ERROR: 'question_id' must be a positive integer");
     }
 
-    std::wstring url = to_wstring(
-        "https://stackoverflow.com/questions/" + std::to_string(qid));
+    std::string url =
+        "https://stackoverflow.com/questions/" + std::to_string(qid);
     // 统一返回原始页面文本,解析交给 AI
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
 }
@@ -120,7 +120,7 @@ json ToolSoGetQuestionDetail(WebViewSession& session, const json& args) {
 // ============================================================
 // 3. so_get_top_answers
 // ============================================================
-json ToolSoGetTopAnswers(WebViewSession& session, const json& args) {
+json ToolSoGetTopAnswers(IBrowserSession& session, const json& args) {
     if (!args.contains("question_id") || !args["question_id"].is_number_integer()) {
         return McpError("ERROR: 'question_id' parameter is required");
     }
@@ -136,9 +136,9 @@ json ToolSoGetTopAnswers(WebViewSession& session, const json& args) {
     if (count < 1) count = 1;
     if (count > 20) count = 20;
 
-    std::wstring url = to_wstring(
+    std::string url =
         "https://stackoverflow.com/questions/" + std::to_string(qid) +
-        "?answertab=votes");
+        "?answertab=votes";
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
@@ -147,7 +147,7 @@ json ToolSoGetTopAnswers(WebViewSession& session, const json& args) {
 // ============================================================
 // 4. so_search_by_tags
 // ============================================================
-json ToolSoSearchByTags(WebViewSession& session, const json& args) {
+json ToolSoSearchByTags(IBrowserSession& session, const json& args) {
     if (!args.contains("tags") || !args["tags"].is_string() ||
         args["tags"].get<std::string>().empty()) {
         return McpError("ERROR: 'tags' parameter is required");
@@ -166,8 +166,8 @@ json ToolSoSearchByTags(WebViewSession& session, const json& args) {
         return McpError("ERROR: 'tags' must contain at least one non-empty tag");
     }
 
-    std::wstring url = to_wstring(
-        "https://stackoverflow.com/questions/tagged" + taggedPath);
+    std::string url = 
+        "https://stackoverflow.com/questions/tagged" + taggedPath;
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
@@ -176,7 +176,7 @@ json ToolSoSearchByTags(WebViewSession& session, const json& args) {
 // ============================================================
 // 5. so_get_similar
 // ============================================================
-json ToolSoGetSimilar(WebViewSession& session, const json& args) {
+json ToolSoGetSimilar(IBrowserSession& session, const json& args) {
     if (!args.contains("title") || !args["title"].is_string() ||
         args["title"].get<std::string>().empty()) {
         return McpError("ERROR: 'title' parameter is required");
@@ -190,9 +190,9 @@ json ToolSoGetSimilar(WebViewSession& session, const json& args) {
     if (count < 1) count = 1;
     if (count > 30) count = 30;
 
-    std::wstring url = to_wstring(
+    std::string url =
         "https://stackoverflow.com/search?q=" + UrlEncodeComponent(title) +
-        "&sort=relevance");
+        "&sort=relevance";
     // 统一返回原始页面文本,解析交给 AI
     (void)count;
     return NavigateAndExecute(session, url, kJsExtractRawPage, kLogPrefix, 2500);
@@ -204,7 +204,7 @@ json ToolSoGetSimilar(WebViewSession& session, const json& args) {
 //    cache_key: so:question:{id}, TTL=24h
 //    entity: question 实体 + tagged_with(tag) 关系 + score 时间快照
 // ============================================================
-json ToolSoFetchQuestionDetail(WebViewSession& session, const json& args) {
+json ToolSoFetchQuestionDetail(IBrowserSession& session, const json& args) {
     std::string questionId;
     if (args.contains("question_id")) {
         if (args["question_id"].is_string()) {
@@ -243,7 +243,7 @@ json ToolSoFetchQuestionDetail(WebViewSession& session, const json& args) {
     }
 
     std::string url = "https://stackoverflow.com/questions/" + questionId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                       kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         if (cm.is_ready()) {

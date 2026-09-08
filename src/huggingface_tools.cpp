@@ -446,7 +446,7 @@ static json NormalizeHfGenericList(const json& raw, const std::string& pageUrl,
 // ============================================================
 // 1. ToolHfSearchModels
 // ============================================================
-json ToolHfSearchModels(WebViewSession& session, const json& args) {
+json ToolHfSearchModels(IBrowserSession& session, const json& args) {
     std::string query;
     std::string task;
     bool hasTask = false;
@@ -473,7 +473,7 @@ json ToolHfSearchModels(WebViewSession& session, const json& args) {
         url += "&pipeline_tag=" + UrlEncodeComponent(task);
     }
 
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " models search page fetch failed");
@@ -487,7 +487,7 @@ json ToolHfSearchModels(WebViewSession& session, const json& args) {
 // ============================================================
 // 2. ToolHfGetModelInfo
 // ============================================================
-json ToolHfGetModelInfo(WebViewSession& session, const json& args) {
+json ToolHfGetModelInfo(IBrowserSession& session, const json& args) {
     std::string modelId;
     if (args.contains("model_id") && args["model_id"].is_string())
         modelId = args["model_id"].get<std::string>();
@@ -499,7 +499,7 @@ json ToolHfGetModelInfo(WebViewSession& session, const json& args) {
     if (!modelId.empty() && modelId[0] == '/') modelId = modelId.substr(1);
 
     std::string url = "https://huggingface.co/" + modelId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " model page fetch failed: " + modelId);
@@ -511,7 +511,7 @@ json ToolHfGetModelInfo(WebViewSession& session, const json& args) {
 // ============================================================
 // 3. ToolHfGetModelReadme
 // ============================================================
-json ToolHfGetModelReadme(WebViewSession& session, const json& args) {
+json ToolHfGetModelReadme(IBrowserSession& session, const json& args) {
     std::string modelId;
     if (args.contains("model_id") && args["model_id"].is_string())
         modelId = args["model_id"].get<std::string>();
@@ -522,7 +522,7 @@ json ToolHfGetModelReadme(WebViewSession& session, const json& args) {
     if (!modelId.empty() && modelId[0] == '/') modelId = modelId.substr(1);
 
     std::string url = "https://huggingface.co/" + modelId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " model page fetch failed: " + modelId);
@@ -536,7 +536,7 @@ json ToolHfGetModelReadme(WebViewSession& session, const json& args) {
 // ============================================================
 // 4. ToolHfSearchDatasets
 // ============================================================
-json ToolHfSearchDatasets(WebViewSession& session, const json& args) {
+json ToolHfSearchDatasets(IBrowserSession& session, const json& args) {
     std::string query;
     int count = kDefaultCount;
 
@@ -554,7 +554,7 @@ json ToolHfSearchDatasets(WebViewSession& session, const json& args) {
     std::string encoded = UrlEncodeComponent(query);
     std::string url = "https://huggingface.co/datasets?search=" + encoded;
 
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " datasets search page fetch failed");
@@ -567,7 +567,7 @@ json ToolHfSearchDatasets(WebViewSession& session, const json& args) {
 // ============================================================
 // 5. ToolHfGetDatasetInfo
 // ============================================================
-json ToolHfGetDatasetInfo(WebViewSession& session, const json& args) {
+json ToolHfGetDatasetInfo(IBrowserSession& session, const json& args) {
     std::string datasetId;
     if (args.contains("dataset_id") && args["dataset_id"].is_string())
         datasetId = args["dataset_id"].get<std::string>();
@@ -578,7 +578,7 @@ json ToolHfGetDatasetInfo(WebViewSession& session, const json& args) {
     if (!datasetId.empty() && datasetId[0] == '/') datasetId = datasetId.substr(1);
 
     std::string url = "https://huggingface.co/datasets/" + datasetId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " dataset page fetch failed: " + datasetId);
@@ -594,7 +594,7 @@ json ToolHfGetDatasetInfo(WebViewSession& session, const json& args) {
 // ============================================================
 // 6. ToolHfGetTrendingModels
 // ============================================================
-json ToolHfGetTrendingModels(WebViewSession& session, const json& args) {
+json ToolHfGetTrendingModels(IBrowserSession& session, const json& args) {
     int count = kDefaultCount;
     if (args.contains("count") && args["count"].is_number_integer())
         count = args["count"].get<int>();
@@ -603,7 +603,7 @@ json ToolHfGetTrendingModels(WebViewSession& session, const json& args) {
     if (count > kMaxCount) count = kMaxCount;
 
     std::string url = "https://huggingface.co/models?sort=trending";
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " trending models page fetch failed");
@@ -616,7 +616,7 @@ json ToolHfGetTrendingModels(WebViewSession& session, const json& args) {
 // ============================================================
 // 7. ToolHfSearchSpaces
 // ============================================================
-json ToolHfSearchSpaces(WebViewSession& session, const json& args) {
+json ToolHfSearchSpaces(IBrowserSession& session, const json& args) {
     std::string query;
     int count = kDefaultCount;
 
@@ -634,7 +634,7 @@ json ToolHfSearchSpaces(WebViewSession& session, const json& args) {
     std::string encoded = UrlEncodeComponent(query);
     std::string url = "https://huggingface.co/spaces?search=" + encoded;
 
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " spaces search page fetch failed");
@@ -650,7 +650,7 @@ json ToolHfSearchSpaces(WebViewSession& session, const json& args) {
 //    cache_key: hf:model:{model_id}, TTL=12h
 //    entity: model 实体 + derived_from(base_model) 关系 + downloads 时间快照
 // ============================================================
-json ToolHfFetchModelDetail(WebViewSession& session, const json& args) {
+json ToolHfFetchModelDetail(IBrowserSession& session, const json& args) {
     std::string modelId;
     if (args.contains("model_id") && args["model_id"].is_string()) {
         modelId = args["model_id"].get<std::string>();
@@ -680,7 +680,7 @@ json ToolHfFetchModelDetail(WebViewSession& session, const json& args) {
     }
 
     std::string url = "https://huggingface.co/" + modelId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                       kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         if (cm.is_ready()) {
@@ -745,7 +745,7 @@ json ToolHfFetchModelDetail(WebViewSession& session, const json& args) {
 //    cache_key: hf:dataset:{dataset_id}, TTL=24h
 //    entity: dataset 实体
 // ============================================================
-json ToolHfFetchDatasetDetail(WebViewSession& session, const json& args) {
+json ToolHfFetchDatasetDetail(IBrowserSession& session, const json& args) {
     std::string datasetId;
     if (args.contains("dataset_id") && args["dataset_id"].is_string()) {
         datasetId = args["dataset_id"].get<std::string>();
@@ -774,7 +774,7 @@ json ToolHfFetchDatasetDetail(WebViewSession& session, const json& args) {
     }
 
     std::string url = "https://huggingface.co/datasets/" + datasetId;
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                       kLogPrefix, 2500, 30000);
     if (raw.is_null()) {
         if (cm.is_ready()) {

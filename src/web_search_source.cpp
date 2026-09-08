@@ -41,7 +41,7 @@ constexpr const char* kJsDdgExtract = R"(
 
 } // namespace
 
-WebSearchSource::WebSearchSource(WebViewSession* session)
+WebSearchSource::WebSearchSource(IBrowserSession* session)
     : session_(session) {}
 
 bool WebSearchSource::healthCheck() {
@@ -58,7 +58,7 @@ std::vector<SearchResult> WebSearchSource::search(const SearchQuery& query) {
 
     json raw = NavigateAndExecuteRaw(
         *session_,
-        std::wstring(url.begin(), url.end()),
+        url,
         kJsDdgExtract,
         kLogPrefix);
 
@@ -115,7 +115,7 @@ std::optional<FetchResult> WebSearchSource::fetch(const std::string& canonical_u
 
     json raw = NavigateAndExecuteRaw(
         *session_,
-        std::wstring(url.begin(), url.end()),
+        url,
         kJsExtractRawPage,
         kLogPrefix);
 

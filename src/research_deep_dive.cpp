@@ -207,7 +207,7 @@ rank_urls(const std::map<std::string, int>& scores,
 // ============================================================
 // Step E: 抓次级网页(带缓存 TTL=72h)
 // ============================================================
-json fetch_secondary_page(WebViewSession& session,
+json fetch_secondary_page(IBrowserSession& session,
                           const std::string& url,
                           int text_max_chars,
                           bool force_refresh) {
@@ -233,7 +233,7 @@ json fetch_secondary_page(WebViewSession& session,
 
     // 实际抓取
     auto start = std::chrono::steady_clock::now();
-    json raw = NavigateAndExecuteRaw(session, to_wstring(url), kJsExtractRawPage,
+    json raw = NavigateAndExecuteRaw(session, url, kJsExtractRawPage,
                                      kLogPrefix, 2500, 30000);
     auto end = std::chrono::steady_clock::now();
     int latency_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -264,7 +264,7 @@ json fetch_secondary_page(WebViewSession& session,
 // ============================================================
 // 主入口
 // ============================================================
-json ToolResearchDeepDive(WebViewSession* web_session, const json& args) {
+json ToolResearchDeepDive(IBrowserSession* web_session, const json& args) {
     // ── 参数解析 ──
     std::string seed_query;
     if (args.contains("seed_query") && args["seed_query"].is_string()) {

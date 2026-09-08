@@ -57,7 +57,7 @@ constexpr const char* kJsCheckAvailable = R"(
 // ============================================================
 // 1. arxiv_search_papers
 // ============================================================
-json ToolArxivSearchPapers(WebViewSession& session, const json& args) {
+json ToolArxivSearchPapers(IBrowserSession& session, const json& args) {
     std::string query;
     int maxResults = 10;
 
@@ -77,9 +77,9 @@ json ToolArxivSearchPapers(WebViewSession& session, const json& args) {
 
     // 构造搜索 URL,start=0,按相关度排序
     std::string encoded = UrlEncode(query);
-    std::wstring url = to_wstring(
+    std::string url =
         "https://arxiv.org/search/?query=" + encoded +
-        "&searchtype=all&start=0&order=-announced_date_first");
+        "&searchtype=all&start=0&order=-announced_date_first";
 
     // 统一返回原始页面文本,解析交给 AI
     (void)maxResults;
@@ -89,7 +89,7 @@ json ToolArxivSearchPapers(WebViewSession& session, const json& args) {
 // ============================================================
 // 2. arxiv_get_paper_detail
 // ============================================================
-json ToolArxivGetPaperDetail(WebViewSession& session, const json& args) {
+json ToolArxivGetPaperDetail(IBrowserSession& session, const json& args) {
     std::string arxivId;
     if (args.contains("arxiv_id") && args["arxiv_id"].is_string())
         arxivId = args["arxiv_id"].get<std::string>();
@@ -105,7 +105,7 @@ json ToolArxivGetPaperDetail(WebViewSession& session, const json& args) {
         arxivId.compare(arxivId.size() - 4, 4, ".pdf") == 0)
         arxivId = arxivId.substr(0, arxivId.size() - 4);
 
-    std::wstring url = to_wstring("https://arxiv.org/abs/" + arxivId);
+    std::string url = "https://arxiv.org/abs/" + arxivId;
     // 统一返回原始页面文本,解析交给 AI
     return NavigateAndExecute(session, url, kJsExtractRawPage, "[arxiv]", 1500, 30000);
 }
@@ -137,8 +137,8 @@ json ToolArxivGetPdfLink(const json& args) {
 // ============================================================
 // 4. arxiv_check_available
 // ============================================================
-json ToolArxivCheckAvailable(WebViewSession& session, const json& /*args*/) {
-    std::wstring url = L"https://arxiv.org";
+json ToolArxivCheckAvailable(IBrowserSession& session, const json& /*args*/) {
+    std::string url = "https://arxiv.org";
     return NavigateAndExecute(session, url, kJsCheckAvailable, "[arxiv]", 1500, 30000);
 }
 
@@ -274,7 +274,7 @@ constexpr const char* kJsArxivAbsDetail = R"(
 // ============================================================
 // 设计:只导航一次 arxiv 搜索页,解析 li.arxiv-result
 // 返回结构化数组,不下载 PDF,网络请求最小化
-json ToolArxivSearchIndex(WebViewSession& session, const json& args) {
+json ToolArxivSearchIndex(IBrowserSession& session, const json& args) {
     std::string query;
     if (args.contains("query") && args["query"].is_string()) {
         query = args["query"].get<std::string>();
@@ -303,7 +303,7 @@ json ToolArxivSearchIndex(WebViewSession& session, const json& args) {
     std::string urlStr = "https://arxiv.org/search/?query=" + encoded +
                          "&searchtype=" + searchtype +
                          "&start=0&order=-announced_date_first";
-    std::wstring url = to_wstring(urlStr);
+    std::string url = urlStr;
 
     json raw = NavigateAndExecuteRaw(session, url, kJsArxivSearchIndex, kArxivLogPrefix, 2500, 30000);
     if (raw.is_null()) {
@@ -339,7 +339,7 @@ json ToolArxivSearchIndex(WebViewSession& session, const json& args) {
 //      (ar5iv 是 arXiv 官方 HTML 渲染版,替代 PDF 解析,无需 PyMuPDF)
 //   3. (可选)从全文末尾提取参考文献段落(简单启发式:References/REFERENCES 之后)
 //   4. C++ 合并结构化结果,按 text_limit_chars 截断
-json ToolArxivFetchPaperDetail(WebViewSession& session, const json& args) {
+json ToolArxivFetchPaperDetail(IBrowserSession& session, const json& args) {
     std::string arxivId;
     if (args.contains("arxiv_id") && args["arxiv_id"].is_string()) {
         arxivId = args["arxiv_id"].get<std::string>();
@@ -409,7 +409,7 @@ json ToolArxivFetchPaperDetail(WebViewSession& session, const json& args) {
     }
 
     // --- 步骤1: 导航 abs 页,提取元数据 + 完整摘要 ---
-    std::wstring absUrl = to_wstring("https://arxiv.org/abs/" + arxivId);
+    std::string absUrl = "https://arxiv.org/abs/" + arxivId;
     json metaRaw = NavigateAndExecuteRaw(session, absUrl, kJsArxivAbsDetail, kArxivLogPrefix, 2000, 30000);
     if (metaRaw.is_null()) {
         // abs 页拉取失败,写入短 TTL 失败缓存(避免短时间内重复回源)
@@ -443,7 +443,7 @@ json ToolArxivFetchPaperDetail(WebViewSession& session, const json& args) {
     std::string fullText;
     std::string fullTextStatus = "skipped";
     if (fetchFullText) {
-        std::wstring ar5ivUrl = to_wstring("https://ar5iv.org/abs/" + arxivId);
+        std::string ar5ivUrl = "https://ar5iv.org/abs/" + arxivId;
         json fullRaw = NavigateAndExecuteRaw(session, ar5ivUrl, kJsExtractRawPage, kArxivLogPrefix, 3000, 30000);
         if (fullRaw.is_object()) {
             if (fullRaw.contains("text") && fullRaw["text"].is_string()) {

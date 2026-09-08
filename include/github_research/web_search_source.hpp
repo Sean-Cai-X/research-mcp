@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 
 #include "github_research/datasource.hpp"
-#include "github_research/webview_session.hpp"
+#include "github_research/browser_session.hpp"
 
 namespace github_research {
 
@@ -14,7 +14,7 @@ namespace github_research {
 // =============================================================
 class WebSearchSource : public IDataSource {
 public:
-    explicit WebSearchSource(WebViewSession* session = nullptr);
+    explicit WebSearchSource(IBrowserSession* session = nullptr);
 
     std::string sourceId() const override { return "web_search"; }
     int priority() const override { return 7; }
@@ -25,7 +25,7 @@ public:
     std::optional<FetchResult> fetch(const std::string& canonical_uri) override;
 
 private:
-    WebViewSession* session_;
+    IBrowserSession* session_;
 };
 
 } // namespace github_research

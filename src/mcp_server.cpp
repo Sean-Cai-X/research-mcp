@@ -1,4 +1,4 @@
-#include "github_research/mcp_server.hpp"
+﻿#include "github_research/mcp_server.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
@@ -14,6 +14,15 @@
 #include "github_research/semanticscholar_tools.hpp"
 #include "github_research/stackoverflow_tools.hpp"
 #include "github_research/webview_helpers.hpp"
+
+// 后端实现头文件: 根据编译宏选择
+#ifdef RESEARCH_MCP_USE_WEBVIEW2
+#include "github_research/webview_session.hpp"
+#endif
+#ifdef RESEARCH_MCP_USE_CDP
+#include "github_research/browser_session_cdp.hpp"
+#endif
+
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -24,10 +33,33 @@
 #include <memory>
 #include <chrono>
 #include <iomanip>
-#include <codecvt>
-#include <locale>
 
 namespace github_research {
+
+// ============ 后端工厂: 根据编译宏创建 IBrowserSession 实例 ============
+namespace {
+std::unique_ptr<IBrowserSession> create_browser_session() {
+#ifdef RESEARCH_MCP_USE_CDP
+    return std::make_unique<CdpBrowserSession>();
+#else
+    // 默认 WebView2
+    return std::make_unique<WebViewSession>();
+#endif
+}
+
+// 轻量 Stub: 纯虚基类 IBrowserSession 的最小实现,IsReady()=false
+// 用于 hn 索引类工具(不依赖 WebView2,但签名需要 session 引用)
+class StubBrowserSession : public IBrowserSession {
+public:
+    bool Init(const std::string&, const std::string& = "", const std::string& = "") override { return false; }
+    void Destroy() override {}
+    bool Navigate(const std::string&) override { return false; }
+    bool WaitForNavigation(uint32_t = 30000) override { return false; }
+    ScriptResult ExecuteScript(const std::string&, uint32_t = 90000) override { ScriptResult r; return r; }
+    bool CheckLogin(const std::string&) override { return false; }
+    bool IsReady() const override { return false; }
+};
+}  // namespace
 
 // ============ 调试日志辅助(带毫秒时间戳) ============
 // 用法: DBG_LOG("hn") << "msg"; 会在 stderr 输出 [12:34:56.789][hn] msg
@@ -99,26 +131,17 @@ void McpServer::set_proxy(const std::string& proxy_url) {
 }
 
 // ============ 通用 init/shutdown 辅助 ============
-bool McpServer::init_session(std::unique_ptr<WebViewSession>& session,
-                              const std::wstring& userDataDir,
+bool McpServer::init_session(std::unique_ptr<IBrowserSession>& session,
+                              const std::string& userDataDir,
                               const std::string& proxy_url,
                               const char* logName) {
     if (session) return true;  // 已初始化
     std::string effective_proxy = proxy_url.empty() ? proxy_url_ : proxy_url;
 
-    // wstring → UTF-8 (WebViewSession::Init 接口用 UTF-8)
-    std::string dir_utf8;
-    try {
-        std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
-        dir_utf8 = conv.to_bytes(userDataDir);
-    } catch (...) {
-        dir_utf8 = std::string(userDataDir.begin(), userDataDir.end());
-    }
-
-    DBG_LOG(logName) << "init_session: creating WebViewSession, proxy=" << effective_proxy;
-    session = std::make_unique<WebViewSession>();
+    DBG_LOG(logName) << "init_session: creating browser session, proxy=" << effective_proxy;
+    session = create_browser_session();
     DBG_LOG(logName) << "init_session: calling session->Init ...";
-    bool ok = session->Init(dir_utf8, "", effective_proxy);
+    bool ok = session->Init(userDataDir, "", effective_proxy);
     if (!ok) {
         DBG_LOG(logName) << "init_session: Init FAILED";
         session.reset();
@@ -129,7 +152,7 @@ bool McpServer::init_session(std::unique_ptr<WebViewSession>& session,
     return true;
 }
 
-void McpServer::shutdown_session(std::unique_ptr<WebViewSession>& session,
+void McpServer::shutdown_session(std::unique_ptr<IBrowserSession>& session,
                                   const char* logName) {
     if (session) {
         log(std::string("shutting down ") + logName + " session");
@@ -139,7 +162,7 @@ void McpServer::shutdown_session(std::unique_ptr<WebViewSession>& session,
 }
 
 // ============ 各源 init/shutdown ============
-bool McpServer::init_arxiv(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_arxiv(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(arxiv_session_, userDataDir, proxy_url, "arXiv");
     if (ok) {
         // 注册 arXiv 数据源 + source_fetch 回调
@@ -148,7 +171,7 @@ bool McpServer::init_arxiv(const std::wstring& userDataDir, const std::string& p
                             0.85, 1500, 100, 0.9, "{}");
         // 回调:entity_key = arxiv_id,调用 ToolArxivFetchPaperDetail 抓取并提取 fields
         // 注意:session 生命周期与 McpServer 一致,捕获裸指针安全
-        WebViewSession* session_ptr = arxiv_session_.get();
+        IBrowserSession* session_ptr = arxiv_session_.get();
         cm.register_source_fetch("arxiv_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
                 if (!session_ptr) throw std::runtime_error("arxiv session not initialized");
@@ -177,7 +200,7 @@ bool McpServer::init_arxiv(const std::wstring& userDataDir, const std::string& p
 }
 void McpServer::shutdown_arxiv() { shutdown_session(arxiv_session_, "arXiv"); }
 
-bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_hackernews(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(hn_session_, userDataDir, proxy_url, "HackerNews");
     if (ok) {
         // 注册 HN 数据源 + source_fetch 回调
@@ -185,7 +208,7 @@ bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::stri
         cm.register_source("hn_web", "web_scrape", "https://news.ycombinator.com",
                             0.8, 800, 200, 0.8, "{}");
         // 回调:entity_key = hn_id,调用 ToolHnFetchDetailedStory 抓取并提取 fields
-        WebViewSession* session_ptr = hn_session_.get();
+        IBrowserSession* session_ptr = hn_session_.get();
         cm.register_source_fetch("hn_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
                 if (!session_ptr) throw std::runtime_error("hn session not initialized");
@@ -214,7 +237,7 @@ bool McpServer::init_hackernews(const std::wstring& userDataDir, const std::stri
 }
 void McpServer::shutdown_hackernews() { shutdown_session(hn_session_, "HackerNews"); }
 
-bool McpServer::init_package(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_package(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(pkg_session_, userDataDir, proxy_url, "Package");
     if (ok) {
         // 注册 npm + pypi 两个数据源 + source_fetch 回调
@@ -223,7 +246,7 @@ bool McpServer::init_package(const std::wstring& userDataDir, const std::string&
                             0.85, 300, 100000, 0.8, "{}");
         cm.register_source("pypi_registry", "api", "https://pypi.org",
                             0.85, 300, 100000, 0.8, "{}");
-        WebViewSession* session_ptr = pkg_session_.get();
+        IBrowserSession* session_ptr = pkg_session_.get();
         // npm 回调:entity_key = 包名(不含 registry 前缀)
         cm.register_source_fetch("npm_registry",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
@@ -272,13 +295,13 @@ bool McpServer::init_package(const std::wstring& userDataDir, const std::string&
 }
 void McpServer::shutdown_package() { shutdown_session(pkg_session_, "Package"); }
 
-bool McpServer::init_paperswithcode(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_paperswithcode(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(pwc_session_, userDataDir, proxy_url, "PapersWithCode");
     if (ok) {
         CacheManager& cm = CacheManager::instance();
         cm.register_source("pwc_web", "web_scrape", "https://paperswithcode.com",
                             0.85, 1500, 100, 0.9, "{}");
-        WebViewSession* session_ptr = pwc_session_.get();
+        IBrowserSession* session_ptr = pwc_session_.get();
         cm.register_source_fetch("pwc_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
                 if (!session_ptr) throw std::runtime_error("pwc session not initialized");
@@ -305,13 +328,13 @@ bool McpServer::init_paperswithcode(const std::wstring& userDataDir, const std::
 }
 void McpServer::shutdown_paperswithcode() { shutdown_session(pwc_session_, "PapersWithCode"); }
 
-bool McpServer::init_huggingface(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_huggingface(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(hf_session_, userDataDir, proxy_url, "HuggingFace");
     if (ok) {
         CacheManager& cm = CacheManager::instance();
         cm.register_source("hf_web", "web_scrape", "https://huggingface.co",
                             0.85, 1200, 200, 0.9, "{}");
-        WebViewSession* session_ptr = hf_session_.get();
+        IBrowserSession* session_ptr = hf_session_.get();
         // model 回调:entity_key = model_id(如 "bert-base-uncased")
         cm.register_source_fetch("hf_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
@@ -359,13 +382,13 @@ bool McpServer::init_huggingface(const std::wstring& userDataDir, const std::str
 }
 void McpServer::shutdown_huggingface() { shutdown_session(hf_session_, "HuggingFace"); }
 
-bool McpServer::init_semanticscholar(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_semanticscholar(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(s2_session_, userDataDir, proxy_url, "SemanticScholar");
     if (ok) {
         CacheManager& cm = CacheManager::instance();
         cm.register_source("s2_web", "web_scrape", "https://www.semanticscholar.org",
                             0.9, 1500, 100, 1.0, "{}");
-        WebViewSession* session_ptr = s2_session_.get();
+        IBrowserSession* session_ptr = s2_session_.get();
         cm.register_source_fetch("s2_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
                 if (!session_ptr) throw std::runtime_error("s2 session not initialized");
@@ -392,13 +415,13 @@ bool McpServer::init_semanticscholar(const std::wstring& userDataDir, const std:
 }
 void McpServer::shutdown_semanticscholar() { shutdown_session(s2_session_, "SemanticScholar"); }
 
-bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::string& proxy_url) {
+bool McpServer::init_stackoverflow(const std::string& userDataDir, const std::string& proxy_url) {
     bool ok = init_session(so_session_, userDataDir, proxy_url, "StackOverflow");
     if (ok) {
         CacheManager& cm = CacheManager::instance();
         cm.register_source("so_web", "web_scrape", "https://stackoverflow.com",
                             0.8, 800, 200, 0.8, "{}");
-        WebViewSession* session_ptr = so_session_.get();
+        IBrowserSession* session_ptr = so_session_.get();
         cm.register_source_fetch("so_web",
             [session_ptr](const std::string& entity_key) -> std::map<std::string, json> {
                 if (!session_ptr) throw std::runtime_error("so session not initialized");
@@ -426,17 +449,10 @@ bool McpServer::init_stackoverflow(const std::wstring& userDataDir, const std::s
 void McpServer::shutdown_stackoverflow() { shutdown_session(so_session_, "StackOverflow"); }
 
 // ============ 懒加载:首次 tool 调用时按 profile 路径初始化对应会话 ============
-namespace {
-// UTF-8 string -> wstring(profile 路径)
-inline std::wstring profile_to_wstr(const std::string& s) {
-    return std::wstring(s.begin(), s.end());
-}
-}  // namespace
-
 bool McpServer::ensure_arxiv_session() {
     if (arxiv_session_) return true;
     if (profile_paths_.arxiv.empty()) return false;
-    return init_arxiv(profile_to_wstr(profile_paths_.arxiv), proxy_url_);
+    return init_arxiv(profile_paths_.arxiv, proxy_url_);
 }
 bool McpServer::ensure_hn_session() {
     if (hn_session_) {
@@ -448,34 +464,34 @@ bool McpServer::ensure_hn_session() {
         return false;
     }
     DBG_LOG("hn") << "ensure_hn_session: first call, invoking init_hackernews ...";
-    bool ok = init_hackernews(profile_to_wstr(profile_paths_.hn), proxy_url_);
+    bool ok = init_hackernews(profile_paths_.hn, proxy_url_);
     DBG_LOG("hn") << "ensure_hn_session: init_hackernews returned " << (ok ? "true" : "false");
     return ok;
 }
 bool McpServer::ensure_pkg_session() {
     if (pkg_session_) return true;
     if (profile_paths_.pkg.empty()) return false;
-    return init_package(profile_to_wstr(profile_paths_.pkg), proxy_url_);
+    return init_package(profile_paths_.pkg, proxy_url_);
 }
 bool McpServer::ensure_pwc_session() {
     if (pwc_session_) return true;
     if (profile_paths_.pwc.empty()) return false;
-    return init_paperswithcode(profile_to_wstr(profile_paths_.pwc), proxy_url_);
+    return init_paperswithcode(profile_paths_.pwc, proxy_url_);
 }
 bool McpServer::ensure_hf_session() {
     if (hf_session_) return true;
     if (profile_paths_.hf.empty()) return false;
-    return init_huggingface(profile_to_wstr(profile_paths_.hf), proxy_url_);
+    return init_huggingface(profile_paths_.hf, proxy_url_);
 }
 bool McpServer::ensure_s2_session() {
     if (s2_session_) return true;
     if (profile_paths_.s2.empty()) return false;
-    return init_semanticscholar(profile_to_wstr(profile_paths_.s2), proxy_url_);
+    return init_semanticscholar(profile_paths_.s2, proxy_url_);
 }
 bool McpServer::ensure_so_session() {
     if (so_session_) return true;
     if (profile_paths_.so.empty()) return false;
-    return init_stackoverflow(profile_to_wstr(profile_paths_.so), proxy_url_);
+    return init_stackoverflow(profile_paths_.so, proxy_url_);
 }
 
 // ============ arXiv 工具分发(6 个工具: 4 原始 + 2 分层) ============
@@ -537,8 +553,8 @@ json McpServer::dispatch_hn_tool(const std::string& tool_name, const json& args)
         tool_name == "hn_get_best_stories" ||
         tool_name == "hn_get_latest_index") {
         try {
-            static WebViewSession dummy_session;  // 未 Init,IsReady()=false
-            WebViewSession& sess = hn_session_ ? *hn_session_ : dummy_session;
+            static StubBrowserSession dummy_session;  // 未 Init,IsReady()=false
+            IBrowserSession& sess = hn_session_ ? *hn_session_ : dummy_session;
             if (tool_name == "hn_get_top_stories")      return ToolHnGetTopStories(sess, args);
             if (tool_name == "hn_get_new_stories")      return ToolHnGetNewStories(sess, args);
             if (tool_name == "hn_get_best_stories")     return ToolHnGetBestStories(sess, args);
@@ -577,7 +593,7 @@ json McpServer::dispatch_research_tool(const std::string& tool_name, const json&
     }
 
     // 根据 mode 决定是否需要 HN session
-    WebViewSession* usable_session = nullptr;
+    IBrowserSession* usable_session = nullptr;
     if (mode == "general") {
         // general 模式: 不依赖 HN,可以没有 WebView session
         // 如果有其他 WebView session(比如 arxiv),也可以传过来做页面抓取
@@ -651,7 +667,7 @@ void McpServer::init_datasource_registry() {
         std::make_unique<GithubWikiSource>(shared_http_client_.get()));
 
     // Source 4: WebCrawler (priority 4) — uses hn_session_ if available
-    WebViewSession* crawl_session = hn_session_ ? hn_session_.get() : nullptr;
+    IBrowserSession* crawl_session = hn_session_ ? hn_session_.get() : nullptr;
     datasource_registry_->register_source(
         std::make_unique<WebCrawlerSource>(crawl_session));
 
@@ -660,7 +676,7 @@ void McpServer::init_datasource_registry() {
         std::make_unique<GithubApiSource>(&client_));
 
     // Source 6: Arxiv (priority 6) — uses arxiv_session_ if available
-    WebViewSession* arxiv_session = arxiv_session_ ? arxiv_session_.get() : nullptr;
+    IBrowserSession* arxiv_session = arxiv_session_ ? arxiv_session_.get() : nullptr;
     datasource_registry_->register_source(
         std::make_unique<ArxivSource>(arxiv_session));
 
