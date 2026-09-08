@@ -114,9 +114,9 @@ std::wstring WebViewSession::build_proxy_arg(const std::string& proxy_url) {
 }
 
 // ============================================================
-// 初始化入口
+// InitInternal: 原有 HRESULT/wstring 实现 (override 包装层)
 // ============================================================
-HRESULT WebViewSession::Init(const std::wstring& userDataDir,
+HRESULT WebViewSession::InitInternal(const std::wstring& userDataDir,
                               const std::wstring& extraArgs,
                               const std::string& proxy_url) {
     std::lock_guard<std::mutex> lock(op_mutex_);
@@ -128,6 +128,16 @@ HRESULT WebViewSession::Init(const std::wstring& userDataDir,
     create_hidden_window();  // 即使失败也继续(nullptr = 无窗口模式)
 
     return create_environment(userDataDir, extraArgs, proxy_url);
+}
+
+// ============================================================
+// Init override (UTF-8 std::string → wstring 转码)
+// ============================================================
+bool WebViewSession::Init(const std::string& userDataDir,
+                          const std::string& extraArgs,
+                          const std::string& proxy_url) {
+    HRESULT hr = InitInternal(Utf8ToWstr(userDataDir), Utf8ToWstr(extraArgs), proxy_url);
+    return SUCCEEDED(hr);
 }
 
 // ============================================================
@@ -285,7 +295,10 @@ void WebViewSession::Destroy() {
 // ============================================================
 // 导航
 // ============================================================
-HRESULT WebViewSession::Navigate(const std::wstring& url) {
+// ============================================================
+// NavigateInternal: 原有 HRESULT/wstring 实现 (override 包装层)
+// ============================================================
+HRESULT WebViewSession::NavigateInternal(const std::wstring& url) {
     std::lock_guard<std::mutex> lock(op_mutex_);
     if (!ready_.load() || !webview_) return E_FAIL;
 
@@ -303,8 +316,16 @@ HRESULT WebViewSession::Navigate(const std::wstring& url) {
     return hr;
 }
 
-HRESULT WebViewSession::WaitForNavigation(uint32_t timeoutMs) {
-    if (!ready_.load()) return E_FAIL;
+// ============================================================
+// Navigate override (UTF-8 std::string → wstring 转码)
+// ============================================================
+bool WebViewSession::Navigate(const std::string& url) {
+    HRESULT hr = NavigateInternal(Utf8ToWstr(url));
+    return SUCCEEDED(hr);
+}
+
+bool WebViewSession::WaitForNavigation(uint32_t timeoutMs) {
+    if (!ready_.load()) return false;
     // 关键:必须 pump 消息循环,否则 NavigationCompleted 事件回调无法触发
     auto start = std::chrono::steady_clock::now();
     while (true) {
@@ -315,12 +336,12 @@ HRESULT WebViewSession::WaitForNavigation(uint32_t timeoutMs) {
         }
         {
             std::lock_guard<std::mutex> lk(nav_mtx_);
-            if (nav_completed_.load()) return nav_result_;
+            if (nav_completed_.load()) return SUCCEEDED(nav_result_);
         }
         if (std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count() > static_cast<int64_t>(timeoutMs)) {
             std::cerr << "[session] WaitForNavigation timeout (>=" << timeoutMs << "ms)" << std::endl;
-            return E_FAIL;
+            return false;
         }
         Sleep(5);
     }

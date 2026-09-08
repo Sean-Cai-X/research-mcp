@@ -1,0 +1,905 @@
+﻿**抛弃所有嵌入型GUI承载（GTK/Qt/HWND），转向「独立Chrome进程 + CDP远程调试协议 + 扩展注入」的纯外控模式**。Chrome自己处理所有窗口系统适配（Windows / X11 / Wayland），你的程序只通过标准网络协议和它交互，全程不碰任何GUI框架，天然跨平台。
+
+这比CEF嵌入路线更彻底地解决了GUI依赖问题，而且行为就是原生Chrome，指纹、兼容性、扩展生态都是满分。
+
+---
+
+## 一、核心原理：零GUI依赖的本质
+
+| 旧思路（嵌入型） | 新思路（外控型） |
+| --- | --- |
+| 把浏览器内核嵌到你的程序窗口里 | 启动一个独立的Chrome进程，通过协议远程指挥 |
+| 需要GTK/Qt/HWND承载窗口 | 窗口完全由Chrome自己管理，你的程序看不见窗口 |
+| 编译时链接浏览器库 | 运行时启动Chrome二进制，通过WebSocket通信 |
+| 平台差异在GUI层 | 平台差异仅在于Chrome启动命令，上层协议100%统一 |
+
+**核心协议：Chrome DevTools Protocol (CDP)**
+这是Chrome原生的远程调试协议，WebSocket接口，所有操作（导航、执行JS、拦截请求、Cookie管理、截图）都是标准JSON命令。你的程序只需要：
+
+1. 一个WebSocket客户端
+2. 一个JSON解析器（项目已有nlohmann/json）
+3. 跨平台进程启动函数
+
+**完全不需要GTK、Qt、Windows SDK、任何GUI相关的头文件和库。**
+
+---
+
+## 二、架构分层：与现有 `IBrowserSession` 完全兼容
+
+业务层和接口层零修改，只新增一个CDP后端实现。
+
+```
+业务层（71工具 / 蔓延逻辑 / MCP协议）
+    │
+    ▼ 纯虚接口，完全不变
+┌──────────────────────┐
+│  IBrowserSession     │  统一UTF-8签名
+└──────────┬───────────┘
+           │
+┌──────────▼───────────┐
+│  CDP Chrome 后端     │  ← 新增，全平台通用
+│  - Chrome进程管理    │
+│  - CDP WebSocket通信 │
+│  - 异步转同步封装    │
+│  - 扩展加载控制      │
+└──────────┬───────────┘
+           │
+    ┌──────▼──────┐
+    │ Chrome 进程 │  原生二进制，自处理GUI
+    │  + 扩展      │  标准Chrome扩展
+    └─────────────┘
+      Windows / X11 / Wayland 全兼容
+```
+
+---
+
+## 三、Chrome 启动配置：全平台通用 + 平台差异
+
+### 3.1 通用启动参数（所有系统完全一样）
+
+```
+chrome/chromium
+  --remote-debugging-port=9222          # CDP调试端口，每个会话一个独立端口
+  --user-data-dir=./profiles/arxiv      # 独立用户目录，Cookie隔离（对应WebView2的userDataFolder）
+  --headless=new                        # 无头模式（服务器无显示环境用）
+  --no-first-run
+  --no-default-browser-check
+  --disable-gpu                         # 无GPU环境加
+  --proxy-server=[http://127.0.0.1:7890](http://127.0.0.1:7890)  # 代理，和WebView2参数等价
+  --load-extension=./extensions/injector # 加载自定义扩展（可选）
+  --window-size=1280,800
+  about:blank
+```
+
+> 
+> **关键：`--headless=new` 是Chrome原生无头模式，不需要Xvfb、不需要Wayland/X11显示服务器，纯后台运行。** 服务器环境直接用，桌面环境去掉这个参数就是有窗口模式。
+
+### 3.2 各平台仅有的差异
+
+| 平台 | 差异点 | 处理方式 |
+| --- | --- | --- |
+| Windows | Chrome路径 | 默认 `C:\Program Files\Google\Chrome\Application\chrome.exe`，可配置 |
+| Linux X11 | Chrome路径 | `google-chrome` / `chromium` / `chromium-browser`，自动探测 |
+| Linux Wayland | 额外参数 | 检测到 `WAYLAND_DISPLAY` 环境变量时，追加 `--ozone-platform=wayland` |
+| Linux Wayland无头 | 无需显示 | `--headless=new` 模式下连Wayland运行时都不需要，纯内核跑 |
+
+**平台差异全部封闭在 `init()` 函数内部**，上层接口无感知。
+
+---
+
+## 四、`IBrowserSession` CDP 实现：完整代码骨架
+
+### 4.1 接口完全不变
+
+继续复用之前定义的 `include/github_research/browser_session.hpp`，业务层零修改。
+
+### 4.2 CDP 实现 `src/browser_session_cdp.cpp`
+
+核心是把CDP的异步WebSocket事件，封装成和之前WebView2/CEF一致的同步接口。
+
+```
+#include "github_research/browser_session.hpp"
+#include <nlohmann/json.hpp>
+#include <websocketpp/client.hpp>                // 或用libcurl websocket / boost.beast
+#include <websocketpp/config/asio_client.hpp>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <string>
+
+namespace github_research {
+using json = nlohmann::json;
+
+class CdpBrowserSession : public IBrowserSession {
+public:
+    CdpBrowserSession() : ws_client_(new websocketpp::client<websocketpp::config::asio_client>) {}
+    ~CdpBrowserSession() override { destroy(); }
+
+    bool init(const std::string& userDataDir,
+              const std::string& extraArgs = "",
+              const std::string& proxy_url = "") override {
+        user_data_dir_ = userDataDir;
+        proxy_url_ = proxy_url;
+
+        // 1. 生成独立端口（避免多会话冲突）
+        debug_port_ = 9222 + next_port_++;
+
+        // 2. 构造启动命令（跨平台封装）
+        std::string cmd = build_chrome_command(debug_port_, userDataDir, proxy_url, extraArgs);
+
+        // 3. 启动Chrome子进程（跨平台：Windows CreateProcess / Linux fork+exec）
+        chrome_pid_ = launch_process(cmd);
+        if (chrome_pid_ == 0) return false;
+
+        // 4. 等待CDP端口就绪（重试10秒）
+        if (!wait_cdp_ready(debug_port_, 10000)) return false;
+
+        // 5. 获取页面WebSocket地址
+        std::string ws_url = get_page_ws_url(debug_port_);
+        if (ws_url.empty()) return false;
+
+        // 6. 建立WebSocket连接
+        ws_client_->set_message_handler(
+            std::bind(&CdpBrowserSession::on_cdp_message, this, std::placeholders::_2));
+        ws_connection_ = ws_client_->get_connection(ws_url);
+        ws_client_->connect(ws_connection_);
+
+        // 7. 启用Page、Runtime域
+        cdp_send("Page.enable", {});
+        cdp_send("Runtime.enable", {});
+
+        ready_ = true;
+        return true;
+    }
+
+    bool navigate(const std::string& url) override {
+        if (!ready_) return false;
+        nav_completed_ = false;
+        nav_success_   = false;
+
+        json params;
+        params["url"] = url;
+        cdp_send("Page.navigate", params);
+        return true;
+    }
+
+    bool wait_for_navigation(uint32_t timeoutMs = 30000) override {
+        auto deadline = std::chrono::steady_clock::now()
+                      + std::chrono::milliseconds(timeoutMs);
+        std::unique_lock<std::mutex> lk(nav_mtx_);
+        while (!nav_completed_) {
+            // 驱动WebSocket事件循环
+            lk.unlock();
+            ws_client_->poll();
+            lk.lock();
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            nav_cv_.wait_for(lk, std::chrono::milliseconds(10));
+        }
+        return nav_success_;
+    }
+
+    ScriptResult execute_script(const std::string& jsCode,
+                                uint32_t timeoutMs = 90000) override {
+        ScriptResult result;
+        if (!ready_) { result.error = "browser not ready"; return result; }
+
+        {
+            std::lock_guard<std::mutex> lk(script_mtx_);
+            script_result_ready_ = false;
+            script_result_data_.clear();
+            script_error_.clear();
+        }
+
+        json params;
+        params["expression"] = jsCode;
+        params["returnByValue"] = true;
+        params["awaitPromise"] = true;
+        cdp_send("Runtime.evaluate", params);
+
+        // 等待结果
+        auto deadline = std::chrono::steady_clock::now()
+                      + std::chrono::milliseconds(timeoutMs);
+        std::unique_lock<std::mutex> lk(script_mtx_);
+        while (!script_result_ready_) {
+            lk.unlock();
+            ws_client_->poll();
+            lk.lock();
+            if (std::chrono::steady_clock::now() > deadline) {
+                result.error = "execute_script timeout";
+                return result;
+            }
+            script_cv_.wait_for(lk, std::chrono::milliseconds(10));
+        }
+
+        if (!script_error_.empty()) {
+            result.success = false;
+            result.error   = script_error_;
+        } else {
+            result.success = true;
+            result.data    = script_result_data_;
+        }
+        return result;
+    }
+
+    void destroy() override {
+        ready_ = false;
+        if (ws_connection_) {
+            ws_client_->close(ws_connection_, websocketpp::close::status::normal, "");
+            ws_connection_.reset();
+        }
+        if (chrome_pid_ != 0) {
+            kill_process(chrome_pid_);
+            chrome_pid_ = 0;
+        }
+    }
+
+    bool is_ready() const override { return ready_.load(); }
+
+private:
+    // ── CDP 底层通信 ──
+    void cdp_send(const std::string& method, const json& params) {
+        json msg;
+        msg["id"] = ++msg_id_;
+        msg["method"] = method;
+        msg["params"] = params;
+        ws_connection_->send(msg.dump());
+    }
+
+    void on_cdp_message(const std::string& msg) {
+        try {
+            json data = json::parse(msg);
+
+            // 事件：导航完成
+            if (data["method"] == "Page.loadEventFired") {
+                std::lock_guard<std::mutex> lk(nav_mtx_);
+                nav_completed_ = true;
+                nav_success_   = true;
+                nav_cv_.notify_all();
+            }
+
+            // 事件：JS执行结果
+            if (data.contains("result") && data["id"].is_number()) {
+                // 匹配Runtime.evaluate的返回
+                auto& result = data["result"]["result"];
+                std::lock_guard<std::mutex> lk(script_mtx_);
+                if (result["type"] == "string") {
+                    script_result_data_ = result["value"];
+                } else {
+                    script_result_data_ = result.dump();
+                }
+                script_result_ready_ = true;
+                script_cv_.notify_all();
+            }
+
+            // 异常处理略
+        } catch (...) {}
+    }
+
+    // ── 跨平台工具函数 ──
+    std::string build_chrome_command(int port, const std::string& userDir,
+                                     const std::string& proxy, const std::string& extra);
+    uint64_t launch_process(const std::string& cmd);
+    void kill_process(uint64_t pid);
+    bool wait_cdp_ready(int port, int timeoutMs);
+    std::string get_page_ws_url(int port);
+
+    // WebSocket
+    std::unique_ptr<websocketpp::client<websocketpp::config::asio_client>> ws_client_;
+    websocketpp::client<websocketpp::config::asio_client>::connection_ptr ws_connection_;
+    int msg_id_{0};
+
+    // Chrome进程
+    uint64_t chrome_pid_{0};
+    int debug_port_{0};
+    static std::atomic<int> next_port_;
+
+    // 状态
+    std::string user_data_dir_;
+    std::string proxy_url_;
+    std::atomic<bool> ready_{false};
+
+    // 导航同步
+    std::mutex              nav_mtx_;
+    std::condition_variable nav_cv_;
+    bool                    nav_completed_{false};
+    bool                    nav_success_{false};
+
+    // JS执行同步
+    std::mutex              script_mtx_;
+    std::condition_variable script_cv_;
+    bool                    script_result_ready_{false};
+    std::string             script_result_data_;
+    std::string             script_error_;
+};
+
+std::atomic<int> CdpBrowserSession::next_port_{0};
+
+// 工厂函数
+std::unique_ptr<IBrowserSession> create_browser_session() {
+    return std::make_unique<CdpBrowserSession>();
+}
+
+} // namespace github_research
+```
+
+---
+
+## 五、Chrome 扩展的集成方式
+
+你提到的「用Chrome的扩展」，在这个架构里是**可选增强组件**，通过 `--load-extension` 参数加载，完全标准的Chrome扩展写法，跨平台零修改。
+
+### 5.1 扩展能做什么（对应之前WebView2的高级能力）
+
+| 能力 | 实现方式 |
+| --- | --- |
+| 请求拦截/修改 | `declarativeNetRequest` API 或 `webRequest` API |
+| 注入自定义JS/CSS | `content_scripts` 或编程注入 |
+| Cookie管理 | `chrome.cookies` API |
+| UA修改 | `declarativeNetRequest` 修改请求头 |
+| 反爬绕过 | 扩展模拟真实用户行为，比纯CDP更难检测 |
+
+### 5.2 扩展与主程序通信
+
+两种方式：
+
+1. **CDP注入**：主程序通过CDP的 `Page.addScriptToEvaluateOnNewDocument` 注入JS，和扩展上下文交互
+2. **本地端口**：扩展开一个本地WebSocket端口，主程序直接连（适合大数据量）
+
+对于research-mcp场景，**大部分功能纯CDP就够了**，扩展只用来处理特殊反爬站点。
+
+---
+
+## 六、跨平台编译配置：零GUI依赖
+
+CMakeLists.txt 异常干净，没有GTK、没有Qt、没有Windows SDK，只需要网络和系统库。
+
+```
+# 所有平台通用的CDP后端配置
+if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "CDP")
+    message(STATUS "Browser backend: CDP (Chrome remote, zero GUI dependency)")
+
+    target_sources(research-mcp PRIVATE
+        src/browser_session_cdp.cpp
+    )
+
+    # 只需要：WebSocket库 + 系统网络库 + 已有nlohmann/json
+    find_package(websocketpp CONFIG QUIET)
+    if(NOT websocketpp_FOUND)
+        # 内嵌头文件模式，websocketpp是纯头库
+        target_include_directories(research-mcp PRIVATE third_party/websocketpp)
+    endif()
+
+    # 平台系统库
+    if(WIN32)
+        target_link_libraries(research-mcp PRIVATE ws2_32)
+    else()
+        target_link_libraries(research-mcp PRIVATE pthread)
+    endif()
+
+    target_compile_definitions(research-mcp PRIVATE RESEARCH_MCP_USE_CDP)
+endif()
+```
+
+**编译依赖只有：C++17 + nlohmann/json + websocketpp（纯头库）。** 没有任何图形库、没有任何平台SDK。
+
+---
+
+## 七、和之前方案的对比
+
+| 维度 | WebView2 | CEF嵌入 | CDP Chrome（本方案） |
+| --- | --- | --- | --- |
+| GUI依赖 | Windows SDK / COM | GTK3 + X11 | **无** |
+| Windows | ✅原生 | ✅ | ✅ |
+| Linux X11 | ❌ | ✅ | ✅ |
+| Linux Wayland | ❌ | 需GTK Wayland后端 | ✅（Chrome原生支持） |
+| 浏览器行为 | Edge Chromium | Chromium | **原生Chrome** |
+| 反爬能力 | 中 | 高 | **最高** |
+| 扩展生态 | 有限 | 需自己实现 | **完整Chrome扩展生态** |
+| 编译复杂度 | 中 | 极高 | **极低** |
+| 体积 | 依赖系统Edge | ~150MB | ~150MB（Chrome二进制） |
+| 进程模型 | 嵌入多进程 | 嵌入多进程 | 独立外进程 |
+| 无头模式 | 支持 | 支持 | **原生headless=new，无需Xvfb** |
+
+---
+
+## 八、关键优势总结
+
+1. **彻底避开GUI框架**：全程不碰GTK、Qt、WPF、HWND，你的程序是纯命令行+网络通信，Chrome自己搞定所有窗口系统适配。
+2. **一次编写全平台跑**：Windows / X11 / Wayland 差异只在Chrome启动命令的几行参数，核心CDP逻辑100%共用。
+3. **行为最真实**：就是标准Chrome，指纹、渲染、JS执行和用户桌面Chrome完全一致，反爬能力远强于CEF/WebView2。
+4. **编译最简单**：不需要构建CEF、不需要GTK开发包、不需要Windows SDK，只需要一个纯头WebSocket库。
+5. **扩展能力强**：所有Chrome扩展都能直接用，相当于直接复用整个Chrome生态。
+6. **故障隔离**：Chrome崩溃不影响主程序，自动重启即可；主程序崩溃Chrome也会自动退出。
+
+---
+
+## 九、迁移工作量
+
+因为 `IBrowserSession` 接口完全对齐，业务层零改动：
+
+| 工作项 | 工时 |
+| --- | --- |
+| 跨平台进程启动/终止封装   |
+| CDP WebSocket通信 + 基础命令封装   |
+| 异步转同步 + 接口对齐  |
+| 扩展加载 + 高级能力（可选）   |
+ 
+
+比CEF路线少一半工作量，核心原因是跳过了所有GUI相关的适配、消息循环、渲染承载，只做纯协议层的封装。
+
+---
+
+## 一句话总结
+
+**用CDP远程控制独立Chrome进程，把所有GUI相关的事全丢给Chrome自己处理，你的程序只发JSON命令。** 天然零GUI依赖，Windows/X11/Wayland全兼容，行为就是原生Chrome，编译简单、迁移快速，完美匹配你「避开GTK/Qt、走Chrome路线」的思路。
+下面完整声明 **CDP Chrome 后端的配置文件规范、Chrome 路径规则、CDP 链接端点、扩展配置** 所有细节，可直接落地为 `browser_config.json` 纳入项目配置体系。
+
+---
+
+## 一、配置文件定位与约定
+
+| 项 | 说明 |
+| --- | --- |
+| 配置文件名 | `browser_config.json` |
+| 加载优先级 | 命令行 `--browser-config` > 环境变量 `RESEARCH_MCP_BROWSER_CONFIG` > `~/.research-mcp/browser_config.json` > 当前目录 `browser_config.json` > 内置默认值 |
+| 格式 | 标准 JSON，支持 `//` 注释（加载时自动剥离） |
+| 作用范围 | 所有 `IBrowserSession` 实例共享全局配置，每个会话可单独覆盖部分参数 |
+
+---
+
+## 二、配置文件完整字段定义
+
+### 1. `chrome` 段：Chrome 二进制与启动配置
+
+```
+"chrome": {
+  "binary_path": "",
+  "binary_path_by_platform": {
+    "windows": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "linux": "/usr/bin/google-chrome",
+    "linux_wayland": "/usr/bin/google-chrome",
+    "macos": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  },
+  "auto_detect": true,
+  "headless_mode": "new",
+  "window_size": [1280, 800],
+  "disable_gpu": true,
+  "no_sandbox": false,
+  "extra_args": []
+}
+```
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| --- | --- | --- | --- |
+| `binary_path` | string | `""` | 全局强制指定 Chrome 可执行文件路径。非空时忽略 `binary_path_by_platform` 和自动探测。 |
+| `binary_path_by_platform` | object | 见下文 | 按平台指定 Chrome 路径，键名：`windows` / `linux` / `linux_wayland` / `macos`。 |
+| `auto_detect` | bool | `true` | 以上都未命中时，是否按平台默认路径自动探测 Chrome / Chromium。 |
+| `headless_mode` | string | `"new"` | 无头模式：   `"new"` = 原生无头（推荐，无需显示服务器）   `"old"` = 旧版无头   `"disabled"` = 有窗口模式 |
+| `window_size` | array | `[1280, 800]` | 视口尺寸，单位像素。无头模式下影响页面布局和截图。 |
+| `disable_gpu` | bool | `true` | 禁用 GPU 加速。服务器/无显卡环境必须开，否则启动失败。 |
+| `no_sandbox` | bool | `false` | 禁用沙箱。容器/root 环境运行时需设为 `true`。 |
+| `extra_args` | array | `[]` | 额外追加的 Chrome 启动参数数组，原样透传。 |
+
+### 2. `cdp` 段：DevTools 协议连接配置
+
+```
+"cdp": {
+  "debug_port_range_start": 9222,
+  "connect_timeout_ms": 15000,
+  "command_timeout_ms": 90000,
+  "navigate_timeout_ms": 30000,
+  "ws_poll_interval_ms": 10,
+  "endpoint_json": "[http://127.0.0.1](http://127.0.0.1):%d/json",
+  "endpoint_ws": "ws://127.0.0.1:%d/devtools/page/%s"
+}
+```
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| --- | --- | --- | --- |
+| `debug_port_range_start` | int | `9222` | CDP 调试端口起始值。多会话并行时自动 +1 递增，避免冲突。 |
+| `connect_timeout_ms` | int | `15000` | Chrome 启动后等待 CDP 端口就绪的超时时间。 |
+| `command_timeout_ms` | int | `90000` | 单条 CDP 命令（如 JS 执行）的超时时间。 |
+| `navigate_timeout_ms` | int | `30000` | 页面导航加载超时时间。 |
+| `ws_poll_interval_ms` | int | `10` | WebSocket 事件循环轮询间隔。 |
+| `endpoint_json` | string | `[http://127.0.0.1](http://127.0.0.1):%d/json` | CDP 目标列表接口格式，`%d` 为端口号。 |
+| `endpoint_ws` | string | `ws://127.0.0.1:%d/devtools/page/%s` | 页面 WebSocket 调试地址格式，`%d`=端口，`%s`=页面ID。 |
+
+### 3. `session` 段：会话隔离与缓存配置
+
+```
+"session": {
+  "user_data_dir_base": "./profiles",
+  "default_profile": "default",
+  "isolate_per_profile": true,
+  "enable_cache": true,
+  "clear_cache_on_start": false
+}
+```
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| --- | --- | --- | --- |
+| `user_data_dir_base` | string | `"./profiles"` | 用户数据目录根路径。每个 profile 对应一个独立子目录。 |
+| `default_profile` | string | `"default"` | 未指定 profile 时使用的默认配置名。 |
+| `isolate_per_profile` | bool | `true` | 每个 profile 完全独立（Cookie、缓存、扩展全部隔离）。 |
+| `enable_cache` | bool | `true` | 是否启用页面缓存。关闭可获得最新页面，但速度慢。 |
+| `clear_cache_on_start` | bool | `false` | 每次启动会话时清空缓存。 |
+
+### 4. `proxy` 段：代理配置
+
+```
+"proxy": {
+  "mode": "direct",
+  "server": "",
+  "bypass_list": ["localhost", "127.0.0.1", "::1"]
+}
+```
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| --- | --- | --- | --- |
+| `mode` | string | `"direct"` | 代理模式：`system` / `direct` / `fixed` |
+| `server` | string | `""` | `fixed` 模式下的代理地址，格式：`http://ip:port` 或 `socks5://ip:port` |
+| `bypass_list` | array | 本地地址 | 不经过代理的域名/IP 列表。 |
+
+### 5. `extensions` 段：Chrome 扩展配置
+
+```
+"extensions": {
+  "enabled": false,
+  "load_paths": [],
+  "inject_scripts": []
+}
+```
+
+| 字段 | 类型 | 默认值 | 详细说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | 是否启用扩展加载。 |
+| `load_paths` | array | `[]` | 扩展目录路径列表，对应 Chrome `--load-extension=` 参数，多个用逗号分隔。 |
+| `inject_scripts` | array | `[]` | 备选：纯 CDP 注入的 JS 文件路径列表，每个页面加载时自动执行。 |
+
+---
+
+## 三、Chrome 二进制路径：平台级细节与探测顺序
+
+### 自动探测顺序（`auto_detect=true` 时）
+
+配置未指定 `binary_path` 时，按以下顺序逐个探测，找到第一个存在的即使用。
+
+#### Windows
+
+```
+1. 配置中 binary_path_by_platform.windows
+2. %PROGRAMFILES%\Google\Chrome\Application\chrome.exe
+3. %PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe
+4. %LOCALAPPDATA%\Google\Chrome\Application\chrome.exe
+5. 环境变量 CHROME_PATH
+6. 命令 where chrome
+```
+
+#### Linux（X11 / Wayland 通用）
+
+```
+1. 配置中 binary_path_by_platform.linux
+2. /usr/bin/google-chrome
+3. /usr/bin/google-chrome-stable
+4. /usr/bin/chromium
+5. /usr/bin/chromium-browser
+6. /snap/bin/chromium
+7. 环境变量 CHROME_PATH
+8. 命令 which google-chrome / which chromium
+```
+
+#### Linux Wayland 额外处理
+
+当检测到 `WAYLAND_DISPLAY` 环境变量且 `headless_mode="disabled"` 时：
+
+- 自动追加启动参数：`--ozone-platform=wayland`
+- 优先使用 `binary_path_by_platform.linux_wayland` 路径
+
+> 
+> **无头模式（`headless_mode="new"`）下既不需要 X11 也不需要 Wayland**，纯内核后台运行，不依赖任何显示服务。
+
+---
+
+## 四、CDP 端点与链接细节
+
+### 关键链接格式
+
+| 用途 | 格式 | 示例 |
+| --- | --- | --- |
+| 获取目标列表 | `[http://127.0.0.1](http://127.0.0.1):<port>/json` | `[http://127.0.0.1:9222/json](http://127.0.0.1:9222/json)` |
+| 获取页面 WebSocket 地址 | 从目标列表中取 `webSocketDebuggerUrl` 字段 | `ws://127.0.0.1:9222/devtools/page/ABC123...` |
+| 浏览器版本信息 | `[http://127.0.0.1](http://127.0.0.1):<port>/json/version` | `[http://127.0.0.1:9222/json/version](http://127.0.0.1:9222/json/version)` |
+
+### 核心 CDP 命令域（research-mcp 用到的）
+
+| 命令 | 对应功能 |
+| --- | --- |
+| `Page.navigate` | 导航到 URL（对应 WebView2 `Navigate`） |
+| `Page.enable` | 启用页面事件 |
+| `Page.loadEventFired` | 导航完成事件（对应 `NavigationCompleted`） |
+| `Runtime.evaluate` | 执行 JS 并返回结果（对应 `ExecuteScript`） |
+| `Runtime.enable` | 启用运行时 |
+| `Network.setUserAgentOverride` | 修改 UA |
+| `Network.setCookie` / `Network.getCookies` | Cookie 管理 |
+| `Page.addScriptToEvaluateOnNewDocument` | 页面加载前注入 JS |
+
+---
+
+## 五、完整配置文件示例
+
+`browser_config.json`：
+
+```
+{
+  // CDP Chrome 后端完整配置
+  "chrome": {
+    "binary_path": "",
+    "binary_path_by_platform": {
+      "windows": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "linux": "/usr/bin/google-chrome",
+      "linux_wayland": "/usr/bin/google-chrome",
+      "macos": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    },
+    "auto_detect": true,
+    "headless_mode": "new",
+    "window_size": [1280, 800],
+    "disable_gpu": true,
+    "no_sandbox": false,
+    "extra_args": [
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-blink-features=AutomationControlled"
+    ]
+  },
+
+  "cdp": {
+    "debug_port_range_start": 9222,
+    "connect_timeout_ms": 15000,
+    "command_timeout_ms": 90000,
+    "navigate_timeout_ms": 30000,
+    "ws_poll_interval_ms": 10,
+    "endpoint_json": "[http://127.0.0.1](http://127.0.0.1):%d/json",
+    "endpoint_ws": "ws://127.0.0.1:%d/devtools/page/%s"
+  },
+
+  "session": {
+    "user_data_dir_base": "./profiles",
+    "default_profile": "default",
+    "isolate_per_profile": true,
+    "enable_cache": true,
+    "clear_cache_on_start": false
+  },
+
+  "proxy": {
+    "mode": "direct",
+    "server": "",
+    "bypass_list": ["localhost", "127.0.0.1", "::1"]
+  },
+
+  "extensions": {
+    "enabled": false,
+    "load_paths": [],
+    "inject_scripts": []
+  }
+}
+```
+
+---
+
+## 六、配置加载与校验逻辑
+
+### 加载流程
+
+```
+1. 读取命令行 --browser-config 参数，有则加载
+2. 读取环境变量 RESEARCH_MCP_BROWSER_CONFIG，有则加载
+3. 检查 ~/.research-mcp/browser_config.json，存在则加载
+4. 检查当前目录 ./browser_config.json，存在则加载
+5. 所有字段和内置默认值合并（用户配置覆盖默认）
+6. 校验 chrome 二进制路径是否存在，不存在则报错
+7. 校验端口范围、超时参数合法性
+```
+
+### 运行时验证命令
+
+```
+# 验证 Chrome 路径与版本
+./research-mcp --browser-check-config
+
+# 输出示例：
+# Chrome path: /usr/bin/google-chrome
+# Chrome version: 128.0.6613.138
+# CDP port: 9222 (test listen OK)
+# Headless mode: new
+# Config validation: PASSED
+```
+
+---
+
+## 七、与 `IBrowserSession` 的对接方式
+
+配置文件在 `CdpBrowserSession::init()` 入口处注入：
+
+```
+bool init(const std::string& userDataDir,
+          const std::string& extraArgs = "",
+          const std::string& proxy_url = "") override {
+    // 1. 加载合并后的全局配置
+    auto& cfg = BrowserConfig::instance();
+    
+    // 2. 参数覆盖：传入参数 > 全局配置
+    std::string effective_proxy = proxy_url.empty() ? cfg.proxy.server : proxy_url;
+    std::string effective_user_dir = userDataDir.empty() ? 
+        cfg.session.user_data_dir_base + "/" + cfg.session.default_profile : userDataDir;
+    
+    // 3. 解析 Chrome 路径
+    std::string chrome_bin = resolve_chrome_path(cfg);
+    
+    // 4. 构造启动命令
+    std::string cmd = build_chrome_command(chrome_bin, debug_port_, 
+                                           effective_user_dir, effective_proxy, cfg);
+    
+    // ... 后续启动进程、连接 CDP
+}
+```
+
+**业务层和 `IBrowserSession` 接口完全不变**，配置全部收敛在实现层内部，对上层透明。
+================================================================================
+ CHECKPOINT / 断点续接 —— 2026-09-08
+================================================================================
+
+# 已完成 (Phase 1 + Phase 2 + 调用点适配)
+
+## Phase 1: IBrowserSession 纯虚接口
+- 创建 include/github_research/browser_session.hpp
+  - ScriptResult 独立出来（shared header）
+  - IBrowserSession 纯虚接口：Init/Navigate/WaitForNavigation/ExecuteScript/CheckLogin/IsReady/Destroy
+  - 全部 UTF-8 std::string，返回 ool，跨平台零 Windows 污染
+
+## Phase 2: WebViewSession 适配 IBrowserSession
+- include/github_research/webview_session.hpp
+  - class WebViewSession : public IBrowserSession
+  - 保留 HRESULT InitInternal(wstring, wstring, string) / HRESULT NavigateInternal(wstring) 私有成员
+  - 删除 ScriptResult 重定义（冲突）
+- src/webview_session.cpp
+  - Init(wstring,...) → 重命名为 InitInternal
+  - Navigate(wstring) → 重命名为 NavigateInternal
+  - WaitForNavigation 返回值 HRESULT → ool
+  - 新增 override 包装层：Init(string,string,string) / Navigate(string) 内部用 Utf8ToWstr 转码后调 Internal
+  - 已有的 Utf8ToWstr/WstrToUtf8 辅助函数复用
+
+## 调用点适配 (为新接口改 UTF-8)
+- src/mcp_server.cpp::init_session
+  - session->Init(userDataDir, L"", effective_proxy) 改成先 wstring_convert 转 UTF-8 string，传空串给 extraArgs，返回值 bool 检查
+  - 加 #include <codecvt> <locale>
+- src/webview_helpers.cpp::NavigateAndExecuteRaw
+  - session.Navigate(url) 改成 wstring→UTF-8 再调；返回值 bool
+  - session.WaitForNavigation 返回值改 bool
+  - 加 #include <codecvt> <locale>
+
+# 即将编译验证
+
+跑完整 Release 构建：
+`
+cmake --build build-rel --config Release --target research-mcp
+`
+如果还有 error C2664/C2447 之类，按编译器提示继续修剩余调用点（可能还有其他 .cpp 直接调 WebViewSession::Navigate/Init）。
+
+# 剩余 Phase (按 next2.txt 规划顺序)
+
+## Phase 3: CMake 新增 CDP 后端编译开关
+- 在 CMakeLists.txt 中：
+  - option(RESEARCH_MCP_BROWSER_BACKEND "Browser backend: WEBVIEW2 or CDP" WEBVIEW2)
+  - if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "CDP")
+    - 加 src/browser_session_cdp.cpp
+    - 加 include/github_research/browser_session_cdp.hpp
+    - 链接 CURL::libcurl（WebSocket 需要 libcurl 启用 WebSocket，curl v8.20.0+ 已内置）
+    - **不**链接 WebView2 SDK、不链接 WebView2Loader、不 ind_package(WebView2)
+  - else() (默认 WEBVIEW2)
+    - 维持原有：加 src/webview_session.cpp、链 WebView2 SDK
+- curl 已在 	hird_party/curl 里（v8.20.0），WebSocket 支持已包含（curl_websockets.h）
+- curl 在 Windows 预编译为 DLL，需确保 CMake ind_package(CURL CONFIG QUIET) 能定位到，否则用 CURL_DIR 指定
+
+## Phase 4: CdpBrowserSession 实现
+- 头文件 include/github_research/browser_session_cdp.hpp
+  - class CdpBrowserSession : public IBrowserSession
+  - 成员：std::string chrome_path_, std::string user_data_dir_, uint16_t debug_port_, PROCESS_INFORMATION proc_info_(Windows 保留), std::mutex ws_mutex_, CURL* ws_handle_, std::string ws_url_, std::atomic<int> next_id_, std::string current_url_
+- 源文件 src/browser_session_cdp.cpp
+  - esolve_chrome_path() —— 优先用 BrowserConfig，回退 %LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe 和 C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
+  - uild_chrome_command() —— 拼 --remote-debugging-port=<port> --user-data-dir=<dir> --proxy-server=<proxy> --no-first-run --no-default-browser-check --headless=new --disable-gpu --disable-dev-shm-usage --disable-blink-features=AutomationControlled
+  - Init() —— 启动 Chrome 子进程（Windows 用 CreateProcessW），然后轮询 http://127.0.0.1:<port>/json/version 直到 200，取 webSocketDebuggerUrl
+  - ConnectWebSocket() —— 用 curl WebSocket API：curl_easy_init + curl_easy_setopt(CURLOPT_URL, ws_url) + curl_easy_perform（注意 curl WebSocket 是 client 端：curl_ws_meta/curl_ws_send/curl_ws_recv）
+  - SendCdpCommand(method, params_json) —— 自增 id，封成 {"id":N,"method":"...","params":{...}}，curl_ws_send，再 curl_ws_recv 循环直到匹配 id 的响应
+  - Navigate(url) —— Page.navigate，等 Page.frameStoppedLoading
+  - WaitForNavigation(timeoutMs) —— 已含在 Navigate 里；独立调用则发 Page.getFrameTree + 等 loadEventFired
+  - ExecuteScript(jsCode, timeoutMs) —— Runtime.evaluate with eturnByValue:true + waitPromise:true
+  - CheckLogin(detectJs) —— ExecuteScript 包一层
+  - Destroy() —— 发 Browser.close + TerminateProcess + CloseHandle + curl_easy_cleanup
+- **关键：curl WebSocket 用法**（curl v8+）：
+  `
+  curl_easy_setopt(handle, CURLOPT_URL, ws_url.c_str());
+  curl_easy_setopt(handle, CURLOPT_WS_OPTIONS, CURLWS_BINARY);
+  curl_easy_perform(handle);  // 进入"握手 + 长连接"模式，之后用 curl_ws_meta/send/recv
+  // 注意 curl_easy_perform 返回后连接仍保持，直到 curl_easy_cleanup 或 curl_ws_close
+  `
+- Windows 进程管理用 <windows.h> + CreateProcessW；在 CMake CDP backend 分支下需要 	arget_link_libraries(... PRIVATE kernel32) 或由 curl 自动带
+
+## Phase 5: BrowserConfig + browser_config.json (可选，可延后)
+- 头 include/github_research/browser_config.hpp
+  - struct BrowserConfig：chrome_path, proxy, session.user_data_dir_base, session.default_profile, session.debug_port_start, ...
+  - static BrowserConfig& instance()
+  - ool load(const std::string& path) / oid load_defaults()
+- 源 src/browser_config.cpp：std::ifstream + nlohmann/json 解析，字段缺省用硬编码 fallback
+- 默认查找顺序：./browser_config.json → %APPDATA%/github_research/browser_config.json → defaults
+- nlohmann/json 已在 third_party
+
+## Phase 6: McpServer session 成员改为 IBrowserSession* + 后端工厂
+- 改头文件 include/github_research/mcp_server.hpp：
+  - std::unique_ptr<WebViewSession> arxiv_session_ 等 → std::unique_ptr<IBrowserSession> arxiv_session_
+  - 删除 init_session(unique_ptr<WebViewSession>& ...)，新增后端工厂
+- 后端工厂（在 mcp_server.cpp 或独立 src/browser_factory.cpp）：
+  `
+  std::unique_ptr<IBrowserSession> create_browser_session() {
+      auto backend = BrowserConfig::instance().backend; // "webview2" / "cdp"
+  #ifdef RESEARCH_MCP_USE_CDP
+      if (backend == "cdp") return std::make_unique<CdpBrowserSession>();
+  #endif
+      return std::make_unique<WebViewSession>();
+  }
+  `
+- CMake 定义宏：	arget_compile_definitions(... PUBLIC RESEARCH_MCP_USE_CDP=1) 条件在 CDP 分支
+- init_arxiv/init_hn/... 全部改成调 create_browser_session() + init_session（IBrowserSession 版本）
+- 所有 ensure_*_session 逻辑不变，只是成员类型变了
+
+## Phase 7: 业务层工具函数签名 WebViewSession* → IBrowserSession*
+- 全局搜索 WebViewSession& / WebViewSession* / unique_ptr<WebViewSession>
+- 文件清单（从 CMakeLists 现有的源码推断）：
+  - src/arxiv_tools.cpp
+  - src/hackernews_tools.cpp
+  - src/package_tools.cpp
+  - src/paperswithcode_tools.cpp
+  - src/huggingface_tools.cpp
+  - src/semanticscholar_tools.cpp
+  - src/stackoverflow_tools.cpp
+  - src/focus_tools.cpp
+  - src/webview_helpers.cpp（已改 Navigate/WaitForNavigation 的返回值，参数类型 WebViewSession& → IBrowserSession&）
+- 所有 include github_research/webview_session.hpp 改成 include github_research/browser_session.hpp
+- **注意**：ExecuteScript 签名在 IBrowserSession 里已与 WebViewSession 完全一致，所以改完类型后函数体内部几乎零改动
+
+## Phase 8: 端到端验证 (Windows)
+- 编译 CDP backend：
+  `
+  cmake -B build-cdp -DRESEARCH_MCP_BROWSER_BACKEND=CDP -DCMAKE_BUILD_TYPE=Release -DCURL_DIR=<path-to-curl-config.cmake>
+  cmake --build build-cdp --config Release --target research-mcp
+  `
+- 跑最简单的数据源，比如 arXiv：
+  `
+  ./research-mcp.exe  # 启动 HTTP server
+  curl http://127.0.0.1:<port>/tools/arxiv_search_papers -d '{"query":"transformer","max_results":1}'
+  `
+- 验证 Chrome 进程被拉起、CDP 握手成功、Navigate 到 arxiv.org、Runtime.evaluate 执行 JS 拿到 JSON
+- 重点观察 stderr 日志里 [session] / [arxiv] 前缀的 DEBUG 输出
+
+# 已跑过的错误记录 (供对照)
+
+1. error C2664: WebViewSession::Init 无法从 const std::wstring 转 const std::string&
+   - 原因：mcp_server.cpp 仍传 wstring/L"" 给新 UTF-8 接口
+   - 修复：mcp_server.cpp init_session 内加 wstring_convert 转 UTF-8
+
+2. error C2664: WebViewSession::Navigate 无法从 const std::wstring 转 const std::string&
+   - 原因：webview_helpers.cpp NavigateAndExecuteRaw 仍传 wstring 给新 UTF-8 接口
+   - 修复：webview_helpers.cpp 内部 wstring_convert 转 UTF-8，同时 WaitForNavigation 返回值也从 HRESULT 改 bool
+
+# 代码位置速查
+
+- 接口头: include/github_research/browser_session.hpp
+- WebView2 头: include/github_research/webview_session.hpp
+- WebView2 实现: src/webview_session.cpp
+- McpServer 头: include/github_research/mcp_server.hpp
+- McpServer 实现: src/mcp_server.cpp
+- 工具函数封装: src/webview_helpers.cpp
+- CMake: CMakeLists.txt
+- curl v8.20.0 + WebSocket: 	third_party/curl/
+

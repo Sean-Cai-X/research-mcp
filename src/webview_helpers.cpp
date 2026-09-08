@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <thread>
 #include <chrono>
+#include <codecvt>
+#include <locale>
 
 namespace github_research {
 
@@ -82,17 +84,24 @@ json NavigateAndExecuteRaw(WebViewSession& session,
     }
     std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms session ready, calling Navigate" << std::endl;
 
-    HRESULT hr = session.Navigate(url);
-    if (FAILED(hr)) {
-        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate failed: 0x" << std::hex << hr << std::endl;
+    // wstring → UTF-8 (WebViewSession::Navigate 接口用 UTF-8)
+    std::string url_utf8;
+    try {
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+        url_utf8 = conv.to_bytes(url);
+    } catch (...) {
+        url_utf8 = std::string(url.begin(), url.end());
+    }
+
+    if (!session.Navigate(url_utf8)) {
+        std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate failed" << std::endl;
         return nullptr;
     }
     std::cerr << logPrefix << " [dbg] +" << dbg_ms() << "ms Navigate OK, waiting for nav completion" << std::endl;
 
-    HRESULT navRes = session.WaitForNavigation(navTimeoutMs);
-    if (FAILED(navRes)) {
+    if (!session.WaitForNavigation(navTimeoutMs)) {
         std::cerr << logPrefix << " [dbg] +" << dbg_ms()
-                  << "ms WaitForNavigation FAILED (hr=0x" << std::hex << navRes
+                  << "ms WaitForNavigation FAILED"
                   << "), page may be incomplete - returning null to avoid false-positive empty results"
                   << std::endl;
         return nullptr;

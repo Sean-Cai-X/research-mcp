@@ -5,7 +5,9 @@
 // 每个实例内置 std::mutex,保证同一会话内自动化操作串行执行
 // 不同 WebViewSession 实例之间操作可以并行
 
-#include <string>
+// 继承 IBrowserSession 跨平台接口,ScriptResult 定义在 browser_session.hpp
+#include "github_research/browser_session.hpp"
+
 #include <mutex>
 #include <atomic>
 #include <future>
@@ -18,53 +20,41 @@
 
 namespace github_research {
 
-// JS 脚本执行返回结构
-struct ScriptResult {
-    bool success{false};
-    std::string data;   // ExecuteScript 返回的 JSON 字符串(已 UTF-8)
-    std::string error;  // 错误信息
-};
-
-class WebViewSession {
+class WebViewSession : public IBrowserSession {
 public:
     WebViewSession();
-    ~WebViewSession();
+    ~WebViewSession() override;
 
     // 禁止拷贝
     WebViewSession(const WebViewSession&) = delete;
     WebViewSession& operator=(const WebViewSession&) = delete;
 
-    // 初始化独立浏览器环境
-    // userDataDir: 独立缓存/Cookie 目录(绝对路径或相对路径)
-    // extraArgs:   额外 Chromium 启动参数(空格分隔),可为空
-    // proxy_url:   显式代理 URL(如 http://127.0.0.1:7897),空表示不设置
-    // 返回 S_OK = 成功
-    HRESULT Init(const std::wstring& userDataDir,
-                 const std::wstring& extraArgs = L"",
-                 const std::string& proxy_url = "");
+    // ============ IBrowserSession 接口实现 (UTF-8, bool 返回值) ============
 
-    // 释放所有 COM 资源,关闭 WebView
-    void Destroy();
+    bool Init(const std::string& userDataDir,
+              const std::string& extraArgs = "",
+              const std::string& proxy_url = "") override;
 
-    // 页面跳转(异步导航,不等加载完成)
-    HRESULT Navigate(const std::wstring& url);
+    void Destroy() override;
 
-    // 等待最近一次导航完成(NavigationCompleted 事件)
-    // timeoutMs: 超时毫秒
-    HRESULT WaitForNavigation(uint32_t timeoutMs = 30000);
+    bool Navigate(const std::string& url) override;
 
-    // 同步执行 JS 脚本,阻塞直到返回结果
-    // timeoutMs: 最长等待时间(毫秒)
-    ScriptResult ExecuteScript(const std::string& jsCode, uint32_t timeoutMs = 90000);
+    bool WaitForNavigation(uint32_t timeoutMs = 30000) override;
 
-    // 检测登录/页面状态(通过注入检测 JS)
-    // loginDetectJs 应返回 JSON 字符串或 true/false 可解析文本
-    bool CheckLogin(const std::string& loginDetectJs);
+    ScriptResult ExecuteScript(const std::string& jsCode, uint32_t timeoutMs = 90000) override;
 
-    // 是否已初始化完成且未销毁
-    bool IsReady() const;
+    bool CheckLogin(const std::string& loginDetectJs) override;
+
+    bool IsReady() const override;
 
 private:
+    // ============ 内部 HRESULT/wstring 实现 (供 override 包装) ============
+    HRESULT InitInternal(const std::wstring& userDataDir,
+                         const std::wstring& extraArgs,
+                         const std::string& proxy_url);
+
+    HRESULT NavigateInternal(const std::wstring& url);
+
     // 初始化 COM
     bool init_com();
     // 创建隐藏宿主窗口(WebView2 Controller 需要 HWND,无窗口模式传 nullptr 即可)

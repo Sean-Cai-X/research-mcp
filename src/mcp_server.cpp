@@ -24,6 +24,8 @@
 #include <memory>
 #include <chrono>
 #include <iomanip>
+#include <codecvt>
+#include <locale>
 
 namespace github_research {
 
@@ -104,12 +106,21 @@ bool McpServer::init_session(std::unique_ptr<WebViewSession>& session,
     if (session) return true;  // 已初始化
     std::string effective_proxy = proxy_url.empty() ? proxy_url_ : proxy_url;
 
+    // wstring → UTF-8 (WebViewSession::Init 接口用 UTF-8)
+    std::string dir_utf8;
+    try {
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> conv;
+        dir_utf8 = conv.to_bytes(userDataDir);
+    } catch (...) {
+        dir_utf8 = std::string(userDataDir.begin(), userDataDir.end());
+    }
+
     DBG_LOG(logName) << "init_session: creating WebViewSession, proxy=" << effective_proxy;
     session = std::make_unique<WebViewSession>();
     DBG_LOG(logName) << "init_session: calling session->Init ...";
-    HRESULT hr = session->Init(userDataDir, L"", effective_proxy);
-    if (FAILED(hr)) {
-        DBG_LOG(logName) << "init_session: Init FAILED: 0x" << std::hex << hr;
+    bool ok = session->Init(dir_utf8, "", effective_proxy);
+    if (!ok) {
+        DBG_LOG(logName) << "init_session: Init FAILED";
         session.reset();
         return false;
     }
