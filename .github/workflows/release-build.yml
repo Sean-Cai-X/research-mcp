@@ -12,80 +12,67 @@ permissions:
   contents: write
 
 jobs:
-  # ── 构建矩阵: Windows WebView2 + Windows/Linux/macOS CDP ────────────────
+  # ── 构建矩阵: Windows WebView2 / Windows CDP / Linux CDP ────────────────
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          # 原生 Windows WebView2 版 (需要 Edge Runtime)
           - os: windows-latest
             backend: WEBVIEW2
             artifact: research-mcp-windows-x64-webview2.zip
-          # Windows CDP 版 (零 GUI 依赖)
           - os: windows-latest
             backend: CDP
             artifact: research-mcp-windows-x64-cdp.zip
           - os: ubuntu-latest
             backend: CDP
             artifact: research-mcp-linux-x64-cdp.tar.gz
-          - os: macos-14
-            backend: CDP
-            artifact: research-mcp-macos-arm64-cdp.tar.gz
 
     runs-on: ${{ matrix.os }}
     steps:
-      - name: 检出源码
+      - name: 检出源码 (third_party/curl/curl-*-win64-mingw 已内置)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       # ── 公共依赖: nlohmann/json ────────────────────────────────────────────
-      - name: 下载 nlohmann/json 单头
-        shell: pwsh
+      - name: 下载 nlohmann/json (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $dst = "third_party/json/include/nlohmann"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
           Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "$dst/json.hpp"
-          Write-Host "nlohmann/json 就位: $dst/json.hpp ($((Get-Item "$dst/json.hpp").Length) bytes)"
+          Write-Host "nlohmann/json ok: $dst/json.hpp"
 
-      - name: 下载 nlohmann/json (Unix)
+      - name: 安装 nlohmann/json + libcurl (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        if: runner.os != 'Windows'
         run: |
-          mkdir -p third_party/json/include/nlohmann
-          curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
-               -o third_party/json/include/nlohmann/json.hpp
-          ls -la third_party/json/include/nlohmann/json.hpp
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential cmake libcurl4-openssl-dev ca-certificates nlohmann-json3-dev pkg-config
 
-      # ── Windows 专属: libcurl 预编译 (WebView2 + CDP 都要) ────────────────
-      - name: 下载 libcurl 预编译 (Windows)
-        shell: pwsh
+      # ── Windows libcurl 验证 (已在仓库,零下载) ──────────────────────────────
+      - name: 验证 libcurl (Windows, 已内置)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
-          $dst = "third_party/curl"
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          $zip = "$dst/curl-mingw.zip"
-          Invoke-WebRequest -Uri "https://curl.se/windows/dl-8.20.0_4/curl-8.20.0_4-win64-mingw.zip" -OutFile $zip -MaximumRedirection 10
-          Expand-Archive -Path $zip -DestinationPath $dst -Force
-          Remove-Item $zip -Force
-          $curlDir = Get-ChildItem -Path $dst -Directory -Filter "curl-*-win64-mingw" | Select-Object -First 1
-          if (-not $curlDir) { throw "未找到 curl-*-win64-mingw 目录" }
-          # CMakeLists 第 60/97 行要求 lib/libcurl.lib
-          lib /machine:x64 /def:"$($curlDir.FullName)/bin/libcurl-x64.def" /out:"$($curlDir.FullName)/lib/libcurl.lib"
-          Write-Host "libcurl 就位: $($curlDir.FullName)"
+          $curlDir = Get-ChildItem -Path "third_party/curl" -Directory -Filter "curl-*-win64-mingw" | Select-Object -First 1
+          if (-not $curlDir) { throw "未找到 third_party/curl/curl-*-win64-mingw — 仓库应该已内置" }
+          $h = "$($curlDir.FullName)/include/curl/curl.h"
+          $l = "$($curlDir.FullName)/lib/libcurl.lib"
+          if (-not (Test-Path $h)) { throw "缺少 $h" }
+          if (-not (Test-Path $l)) { throw "缺少 $l" }
+          Write-Host "libcurl ok: $($curlDir.FullName)"
 
       # ── WebView2 后端专属 ─────────────────────────────────────────────────
       - name: 下载 WebView2 NuGet 包 (仅 WebView2 后端)
-        shell: pwsh
         if: runner.os == 'Windows' && matrix.backend == 'WEBVIEW2'
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
           $nupkg = "WebView2.zip"
           Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2792.45" -OutFile $nupkg -MaximumRedirection 10
           Expand-Archive -Path $nupkg -DestinationPath "WebView2-nupkg" -Force
@@ -97,23 +84,7 @@ jobs:
           $redistSrc = "WebView2-nupkg/runtimes/win-x64/native/WebView2Loader.dll"
           if (-not (Test-Path $redistSrc)) { $redistSrc = "WebView2-nupkg/build/native/x64/WebView2Loader.dll" }
           Copy-Item $redistSrc "$dst/redist/x64/" -Force
-          Write-Host "WebView2 SDK 就位:"; Get-ChildItem -Recurse $dst | Select-Object FullName
-
-      # ── Unix 依赖安装 ─────────────────────────────────────────────────────
-      - name: 安装依赖 (Linux)
-        shell: bash
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y build-essential cmake libcurl4-openssl-dev ca-certificates
-
-      - name: 安装依赖 (macOS)
-        shell: bash
-        if: runner.os == 'macOS'
-        run: |
-          brew install cmake curl || brew install cmake
-          # 确保 libcurl 头/库可见
-          brew list curl >/dev/null 2>&1 || true
+          Write-Host "WebView2 SDK ok"
 
       # ── 编译 ───────────────────────────────────────────────────────────────
       - name: 加载 MSVC 编译环境 (Windows)
@@ -121,8 +92,8 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: CMake 配置 + 编译 (Windows)
-        shell: pwsh
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "build" | Out-Null
           Set-Location build
@@ -132,18 +103,18 @@ jobs:
                 ..
           cmake --build . --config Release
 
-      - name: CMake 配置 + 编译 (Unix)
+      - name: CMake 配置 + 编译 (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        if: runner.os != 'Windows'
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
                         -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}"
-          cmake --build build -j"$(nproc || sysctl -n hw.ncpu)"
+          cmake --build build -j"$(nproc)"
 
       # ── 打包 ───────────────────────────────────────────────────────────────
       - name: 打包 Windows
-        shell: pwsh
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "deploy" | Out-Null
@@ -151,23 +122,21 @@ jobs:
           if (-not (Test-Path $exe)) { $exe = "build/research-mcp.exe" }
           Copy-Item $exe "deploy/"
 
-          # 运行时依赖
           foreach ($rt in @("WebView2Loader.dll", "libcurl-x64.dll", "curl-ca-bundle.crt")) {
             foreach ($cand in @("build/Release/$rt", "build/$rt")) {
               if (Test-Path $cand) { Copy-Item $cand "deploy/"; break }
             }
           }
 
-          if (Test-Path "README.md")  { Copy-Item "README.md"  "deploy/" }
+          if (Test-Path "README.md") { Copy-Item "README.md" "deploy/" }
 
           $zip = "${{ matrix.artifact }}"
           7z a $zip deploy/*
           Write-Host "打包完成: $zip ($((Get-Item $zip).Length) bytes)"
-          7z l $zip
 
-      - name: 打包 Unix
+      - name: 打包 Linux
+        if: runner.os == 'Linux'
         shell: bash
-        if: runner.os != 'Windows'
         run: |
           mkdir -p deploy
           find build -name research-mcp -type f -executable -exec cp {} deploy/ \;
@@ -175,7 +144,7 @@ jobs:
           tar czf "${{ matrix.artifact }}" deploy/
           ls -la "${{ matrix.artifact }}"
 
-      # ── 上传为 artifact (供 create-release job 收集) ────────────────────────
+      # ── 上传 artifact ───────────────────────────────────────────────────────
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -198,43 +167,38 @@ jobs:
         run: ls -la artifacts/
 
       - name: 生成变更日志
-        id: changelog
         run: |
-          echo "## 🚀 新增 CDP 跨平台浏览器后端" >> notes.md
-          echo "" >> notes.md
-          echo "- Windows / Linux / macOS 零 GUI 依赖的 Chrome DevTools Protocol 后端" >> notes.md
-          echo "- 放弃 curl WebSocket 高层 API, 改用原生 socket + 手写 WS 帧 (opcode=1 TEXT)" >> notes.md
-          echo "- 自动处理分片帧拼接 (FIN 位 + opcode=0x00 continuation)" >> notes.md
-          echo "- 支持 WebView2 (Windows) 和 CDP (跨平台) 两种后端, CMake 一键切换" >> notes.md
-          echo "" >> notes.md
-          echo "### 后端对比" >> notes.md
-          echo "" >> notes.md
-          echo "| 维度 | Windows WebView2 | Windows CDP | Linux CDP | macOS CDP |" >> notes.md
-          echo "|------|------------------|-------------|-----------|-----------|" >> notes.md
-          echo "| 需要 Edge Runtime | ✅ | ❌ | ❌ | ❌ |" >> notes.md
-          echo "| 需要 Chrome | ❌ | ✅ | ✅ | ✅ |" >> notes.md
-          echo "| 体积 | 大 | 小 | 小 | 小 |" >> notes.md
-          echo "| 进程模型 | 嵌入 | 独立 Chrome | 独立 Chrome | 独立 Chrome |" >> notes.md
-          echo "" >> notes.md
-          echo "### 快速启动" >> notes.md
-          echo '```bash' >> notes.md
-          echo "# Windows CDP" >> notes.md
-          echo "./research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv" >> notes.md
-          echo "" >> notes.md
-          echo "# Linux / macOS CDP (需 CHROME_PATH 或系统 Chrome)" >> notes.md
-          echo "CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv" >> notes.md
-          echo '```' >> notes.md
-          echo "" >> notes.md
-          echo "### 下载" >> notes.md
-          echo "" >> notes.md
-          echo "- **Windows WebView2**: 仅推荐有 Edge Runtime 的 Windows 10/11 用户" >> notes.md
-          echo "- **Windows CDP / Linux / macOS**: 下载对应平台的 CDP 版"
-          echo "" >> notes.md
-          echo "### 源码" >> notes.md
-          echo "" >> notes.md
-          echo "GitHub Release 自动附带 `Source code (zip)` / `Source code (tar.gz)`" >> notes.md
-          echo "" >> notes.md
-          cat notes.md
+          cat > notes.md << 'EOF'
+## 🚀 新增 CDP 跨平台浏览器后端
+
+### 后端对比
+
+| 维度 | Windows WebView2 | Windows CDP | Linux CDP |
+|------|------------------|-------------|-----------|
+| 需要 Edge Runtime | ✅ | ❌ | ❌ |
+| 需要 Chrome | ❌ | ✅ | ✅ |
+| 体积 | 大 | 小 | 小 |
+| 进程模型 | 嵌入 | 独立 Chrome | 独立 Chrome |
+
+### 快速启动
+
+```bash
+# Windows CDP
+./research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
+
+# Linux CDP (需 CHROME_PATH 或系统 Chrome)
+CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
+```
+
+### 下载
+
+- **Windows WebView2**: 仅推荐有 Edge Runtime 的 Windows 10/11 用户
+- **Windows CDP / Linux CDP**: 下载对应平台的 CDP 版
+
+### 源码
+
+GitHub Release 自动附带 `Source code (zip)` / `Source code (tar.gz)`
+EOF
 
       - name: 创建 Release 并上传制品
         uses: softprops/action-gh-release@v2
