@@ -1,6 +1,5 @@
 name: Build & Publish Release
 
-# 推送 v* / gn-* 标签触发,也支持手动
 on:
   push:
     tags:
@@ -12,7 +11,6 @@ permissions:
   contents: write
 
 jobs:
-  # ── 构建矩阵: Windows WebView2 / Windows CDP / Linux CDP ────────────────
   build:
     strategy:
       fail-fast: false
@@ -30,67 +28,24 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - name: 检出源码 (third_party/curl/curl-*-win64-mingw 已内置)
+      - name: 检出源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── 公共依赖: nlohmann/json ────────────────────────────────────────────
-      - name: 下载 nlohmann/json (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $dst = "third_party/json/include/nlohmann"
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "$dst/json.hpp"
-          Write-Host "nlohmann/json ok: $dst/json.hpp"
-
-      - name: 安装 nlohmann/json + libcurl (Linux)
+      # ── Linux: apt install (唯一外网下载,走 apt 官方仓库) ────────────────
+      - name: 安装系统依赖 (Linux)
         if: runner.os == 'Linux'
-        shell: bash
         run: |
           sudo apt-get update -y
           sudo apt-get install -y build-essential cmake libcurl4-openssl-dev ca-certificates nlohmann-json3-dev pkg-config
 
-      # ── Windows libcurl 验证 (已在仓库,零下载) ──────────────────────────────
-      - name: 验证 libcurl (Windows, 已内置)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $curlDir = Get-ChildItem -Path "third_party/curl" -Directory -Filter "curl-*-win64-mingw" | Select-Object -First 1
-          if (-not $curlDir) { throw "未找到 third_party/curl/curl-*-win64-mingw — 仓库应该已内置" }
-          $h = "$($curlDir.FullName)/include/curl/curl.h"
-          $l = "$($curlDir.FullName)/lib/libcurl.lib"
-          if (-not (Test-Path $h)) { throw "缺少 $h" }
-          if (-not (Test-Path $l)) { throw "缺少 $l" }
-          Write-Host "libcurl ok: $($curlDir.FullName)"
-
-      # ── WebView2 后端专属 ─────────────────────────────────────────────────
-      - name: 下载 WebView2 NuGet 包 (仅 WebView2 后端)
-        if: runner.os == 'Windows' && matrix.backend == 'WEBVIEW2'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $nupkg = "WebView2.zip"
-          Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2792.45" -OutFile $nupkg -MaximumRedirection 10
-          Expand-Archive -Path $nupkg -DestinationPath "WebView2-nupkg" -Force
-          $dst = "third_party/WebView2"
-          New-Item -ItemType Directory -Force -Path "$dst/include", "$dst/lib/x64", "$dst/redist/x64" | Out-Null
-          Copy-Item "WebView2-nupkg/build/native/include/WebView2.h"                  "$dst/include/" -Force
-          Copy-Item "WebView2-nupkg/build/native/include/WebView2EnvironmentOptions.h" "$dst/include/" -Force
-          Copy-Item "WebView2-nupkg/build/native/x64/WebView2Loader.dll.lib"          "$dst/lib/x64/" -Force
-          $redistSrc = "WebView2-nupkg/runtimes/win-x64/native/WebView2Loader.dll"
-          if (-not (Test-Path $redistSrc)) { $redistSrc = "WebView2-nupkg/build/native/x64/WebView2Loader.dll" }
-          Copy-Item $redistSrc "$dst/redist/x64/" -Force
-          Write-Host "WebView2 SDK ok"
-
-      # ── 编译 ───────────────────────────────────────────────────────────────
+      # ── Windows: 加载 MSVC 编译环境 ──────────────────────────────────────
       - name: 加载 MSVC 编译环境 (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # ── 编译 ───────────────────────────────────────────────────────────────
       - name: CMake 配置 + 编译 (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -118,21 +73,17 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "deploy" | Out-Null
-          $exe = "build/Release/research-mcp.exe"
-          if (-not (Test-Path $exe)) { $exe = "build/research-mcp.exe" }
-          Copy-Item $exe "deploy/"
+          $exe = if (Test-Path "build/Release/research-mcp.exe") { "build/Release/research-mcp.exe" } else { "build/research-mcp.exe" }
+          Copy-Item $exe "deploy/" -Force
 
           foreach ($rt in @("WebView2Loader.dll", "libcurl-x64.dll", "curl-ca-bundle.crt")) {
             foreach ($cand in @("build/Release/$rt", "build/$rt")) {
-              if (Test-Path $cand) { Copy-Item $cand "deploy/"; break }
+              if (Test-Path $cand) { Copy-Item $cand "deploy/" -Force; break }
             }
           }
 
-          if (Test-Path "README.md") { Copy-Item "README.md" "deploy/" }
-
           $zip = "${{ matrix.artifact }}"
           7z a $zip deploy/*
-          Write-Host "打包完成: $zip ($((Get-Item $zip).Length) bytes)"
 
       - name: 打包 Linux
         if: runner.os == 'Linux'
@@ -140,9 +91,7 @@ jobs:
         run: |
           mkdir -p deploy
           find build -name research-mcp -type f -executable -exec cp {} deploy/ \;
-          cp README.md deploy/ 2>/dev/null || true
           tar czf "${{ matrix.artifact }}" deploy/
-          ls -la "${{ matrix.artifact }}"
 
       # ── 上传 artifact ───────────────────────────────────────────────────────
       - name: 上传构建产物
@@ -152,7 +101,7 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ── Release 创建 + 源码包 ──────────────────────────────────────────────
+  # ── Release ──────────────────────────────────────────────────────────
   create-release:
     needs: build
     runs-on: ubuntu-latest
@@ -162,9 +111,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      - name: 列下载内容
-        run: ls -la artifacts/
 
       - name: 创建 Release 并上传制品
         uses: softprops/action-gh-release@v2

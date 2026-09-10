@@ -1,4 +1,4 @@
-# Build output (保留 build/release.args / build/debug.args 用于 GN 通用模板)
+﻿# Build output (保留 build/release.args / build/debug.args 用于 GN 通用模板)
 build/*
 !build/release.args
 !build/debug.args
@@ -39,7 +39,7 @@ cmake_install.cmake
 # Dependencies (third-party binaries, should be fetched separately)
 third_party/WebView2/redist/
 third_party/WebView2/lib/
-third_party/json/
+# nlohmann/json: v0.3.5 起已内置 single-header
 # NuGet 包和解压中间产物(用户自行下载)
 third_party/downloads/
 # curl 官方预编译包 — v0.3.5 起已内置 curl-8.20.0_4-win64-mingw
