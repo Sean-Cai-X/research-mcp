@@ -10,6 +10,14 @@ on:
 permissions:
   contents: write
 
+# ============================================================================
+# 所有第三方库由 CMake FetchContent 从官方源码/发行包拉取:
+#   nlohmann/json -> GitHub tag v3.11.3
+#   curl          -> GitHub tag curl-8_20_0 (WebSocket API)
+#   WebView2 SDK  -> NuGet Microsoft.Web.WebView2 (仅 WEBVIEW2 后端)
+#   sqlite3       -> 仓库 third_party/sqlite/ (amalgamation 源码)
+# ============================================================================
+
 jobs:
   build:
     strategy:
@@ -30,35 +38,34 @@ jobs:
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ── Linux: apt install (唯一外网下载,走 apt 官方仓库) ────────────────
+      # ── Linux: 系统依赖 (OpenSSL 供 curl, ca-certificates 供 HTTPS) ──────
       - name: 安装系统依赖 (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential cmake libcurl4-openssl-dev ca-certificates nlohmann-json3-dev pkg-config
+          sudo apt-get install -y build-essential cmake libssl-dev ca-certificates pkg-config
 
       # ── Windows: 加载 MSVC 编译环境 ──────────────────────────────────────
       - name: 加载 MSVC 编译环境 (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # ── 编译 ───────────────────────────────────────────────────────────────
-      - name: CMake 配置 + 编译 (Windows)
+      # ── CMake Configure + Build ──────────────────────────────────────────
+      # FetchContent 在 configure 阶段自动从 GitHub/NuGet 拉取:
+      #   Windows:   curl(static+Schannel) + nlohmann_json(static) + WebView2(NuGet zip)
+      #   Linux CDP: curl(static+OpenSSL) + nlohmann_json(static)
+      - name: CMake Configure + Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "build" | Out-Null
-          Set-Location build
-          cmake -DCMAKE_BUILD_TYPE=Release `
+          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+                -DCMAKE_BUILD_TYPE=Release `
                 -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded" `
-                -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}" `
-                ..
-          cmake --build . --config Release
+                -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}"
+          cmake --build build --config Release -j 4
 
-      - name: CMake 配置 + 编译 (Linux)
+      - name: CMake Configure + Build (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -66,17 +73,20 @@ jobs:
                         -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}"
           cmake --build build -j"$(nproc)"
 
-      # ── 打包 ───────────────────────────────────────────────────────────────
+      # ── 打包 ─────────────────────────────────────────────────────────────
       - name: 打包 Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "deploy" | Out-Null
+
           $exe = if (Test-Path "build/Release/research-mcp.exe") { "build/Release/research-mcp.exe" } else { "build/research-mcp.exe" }
           Copy-Item $exe "deploy/" -Force
 
-          foreach ($rt in @("WebView2Loader.dll", "libcurl-x64.dll", "curl-ca-bundle.crt")) {
+          # FetchContent 生成的 curl 是静态链接到 exe 的, 运行时不需要 .dll
+          # 只有 WebView2Loader.dll (NuGet 解压后) 需要带
+          foreach ($rt in @("WebView2Loader.dll")) {
             foreach ($cand in @("build/Release/$rt", "build/$rt")) {
               if (Test-Path $cand) { Copy-Item $cand "deploy/" -Force; break }
             }
@@ -93,7 +103,7 @@ jobs:
           find build -name research-mcp -type f -executable -exec cp {} deploy/ \;
           tar czf "${{ matrix.artifact }}" deploy/
 
-      # ── 上传 artifact ───────────────────────────────────────────────────────
+      # ── 上传 artifact ────────────────────────────────────────────────────
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -101,7 +111,7 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ── Release ──────────────────────────────────────────────────────────
+  # ── Release 创建 ──────────────────────────────────────────────────
   create-release:
     needs: build
     runs-on: ubuntu-latest
@@ -120,7 +130,19 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## 🚀 v0.3.5: CI 修复 + CDP 跨平台后端
+            ## 🚀 v0.3.5: FetchContent 纯源码构建 + CDP 跨平台后端
+
+            ### 零预编译二进制
+
+            所有依赖由 CMake FetchContent 从官方源码/发行包拉取, 仓库只存源码:
+            | 依赖 | 来源 |
+            |------|------|
+            | nlohmann/json | GitHub tag v3.11.3 |
+            | curl 8.20 | GitHub tag curl-8_20_0 (WebSocket API) |
+            | WebView2 SDK | NuGet Microsoft.Web.WebView2 (仅 WEBVIEW2) |
+            | sqlite3 | third_party/sqlite/ (amalgamation) |
+
+            curl 静态链接到 exe, 无运行时 DLL 依赖.
 
             ### 后端对比
 
@@ -140,11 +162,5 @@ jobs:
             # Linux CDP (需 CHROME_PATH 或系统 Chrome)
             CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
             ```
-
-            ### 下载说明
-
-            - **Windows WebView2**: 推荐有 Edge Runtime 的 Windows 10/11 用户
-            - **Windows CDP / Linux CDP**: 下载对应平台 CDP 版（需系统已安装 Chrome）
-            - **源码包**: GitHub Release 自动附带 Source code (zip) / (tar.gz)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

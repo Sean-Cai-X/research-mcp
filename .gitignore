@@ -36,16 +36,16 @@ cmake_install.cmake
 *.cmake
 !CMakeLists.txt
 
-# Dependencies (third-party binaries, should be fetched separately)
-third_party/WebView2/redist/
-third_party/WebView2/lib/
-# nlohmann/json: v0.3.5 起已内置 single-header
-# NuGet 包和解压中间产物(用户自行下载)
-third_party/downloads/
-# curl 官方预编译包 — v0.3.5 起已内置 curl-8.20.0_4-win64-mingw
-# 如需手动替换: https://curl.se/windows/ -> 解压到 third_party/curl/ 后 lib /machine:x64 /def:bin\libcurl-x64.def
+# Dependencies: 仓库只存源码, 预编译二进制/运行时包全排除
+# FetchContent 下载缓存 (CMake configure 时自动拉, 不在仓库里)
+_fetchcontent/
+cmake-build-*/
+
+# NuGet 临时包 (FetchContent 下载后解压, .nupkg 本身是 zip)
 *.nupkg
-*.zip
+
+# third_party/curl + third_party/WebView2 已删除 (FetchContent 替代)
+# third_party/sqlite (amalgamation 源码) + third_party/json (单头) 保留
 
 # Runtime data
 webview2-data/
