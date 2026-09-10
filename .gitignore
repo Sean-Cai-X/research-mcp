@@ -2,6 +2,8 @@
 build/*
 !build/release.args
 !build/debug.args
+build-cdp/
+build-webview2/
 build-rel/
 build-release/
 build-debug/
@@ -72,3 +74,15 @@ Desktop.ini
 /other
 /next.txt
 /next2.txt
+
+# CDP debug / test scratch files
+ws_frames.log
+req.json
+req2.json
+req3.json
+server_final.log
+browser_config.json
+_fix_readme.py
+*_test.txt
+test_integration.ps1
+CDP_CHECKPOINT_*.md

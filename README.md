@@ -1,11 +1,13 @@
-﻿# github-research-mcp (DeerFlow++)
+# github-research-mcp (DeerFlow++)
 
-9 源统一研究 MCP 服务,基于 **混合技术栈(libcurl + WebView2)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
+9 源统一研究 MCP 服务,基于 **可切换浏览器后端(libcurl + WebView2 | libcurl + CDP)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
 
 ## 特性
 
 - **9 源 71 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
-- **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走 **WebView2**(完整 Chromium 指纹、JS 渲染、DOM 提取)
+- **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走浏览器后端
+- **浏览器后端可切换**:CMake 开关 `RESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2`(默认,Windows 专属) 或 `CDP`(跨平台,零 GUI 依赖,独立 Chrome 进程 + DevTools Protocol)
+- **CDP 后端原理**:启动独立 Chrome `--remote-debugging-port`,原生 Winsock2/POSIX socket 手写 WebSocket 帧(opcode=1 TEXT),CDP JSON 直接双向通信;自动处理分片帧拼接、ping/pong、代理隔离
 - **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
 - **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
 - **多实例会话隔离**:每个网页源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
@@ -736,17 +738,28 @@ $r.result.content[0].text
 
 ## 环境要求(自行编译时)
 
+### WebView2 后端(默认,Windows 专属)
+
 - Windows 10/11 x64
 - Edge Runtime(Win10/11 自带)
 - Visual Studio 2022(C++ 桌面开发 + Windows 11 SDK)
 - CMake 3.16+
 
+### CDP 后端(跨平台,推荐 Linux / macOS / CI)
+
+- Windows / Linux / macOS 任意 C++20 编译器(MSVC 2022 / GCC 12+ / Clang 16+)
+- CMake 3.16+
+- **Chrome / Chromium 可执行文件**(机器任意安装路径,或通过 `CHROME_PATH` 环境变量指定)
+- 不需要 WebView2 / Edge Runtime / GUI 组件
+
 ## 依赖
 
 | 依赖 | 获取方式 |
 |---|---|
-| WebView2 SDK | NuGet 包 `Microsoft.Web.WebView2`,解压到 `third_party/WebView2/` |
+| WebView2 SDK | NuGet 包 `Microsoft.Web.WebView2`,解压到 `third_party/WebView2/`(仅 WEBVIEW2 后端) |
+| Chrome / Chromium | 系统预装,或通过 `CHROME_PATH` 环境变量指定(仅 CDP 后端) |
 | nlohmann/json | vcpkg 安装,或单 header 放到 `third_party/json/include/` |
+| libcurl v8.20+ | CDP 后端使用 curl 完成 HTTP 请求 + Chrome 进程启动(可选代理隔离) |
 | SQLite | 源码已内置 `third_party/sqlite/sqlite3.c` |
 
 ## 构建
@@ -761,6 +774,118 @@ cmake --build build --config Release
 - `build/Release/research-mcp.exe`
 - `build/Release/WebView2Loader.dll`
 - `build/tests/Release/test_smoke.exe`
+
+### CDP 后端构建(跨平台)
+
+```powershell
+# Windows (PowerShell)
+cmake -B build-cdp -S . -DCMAKE_BUILD_TYPE=Release -DRESEARCH_MCP_BROWSER_BACKEND=CDP
+cmake --build build-cdp --config Release
+
+# Linux / macOS
+cmake -B build-cdp -S . -DCMAKE_BUILD_TYPE=Release -DRESEARCH_MCP_BROWSER_BACKEND=CDP
+cmake --build build-cdp -j$(nproc)
+```
+
+构建产物:
+- `build-cdp/Release/research-mcp.exe` / `build-cdp/research-mcp`(无 WebView2Loader.dll, 零 GUI)
+
+### CDP 后端运行
+
+```powershell
+# Windows: 默认路径可自动发现 Chrome (C:\Program Files\Google\Chrome\Application\chrome.exe)
+.\build-cdp\Release\research-mcp.exe --port 8771 `
+  --gh-profile    ./profiles/gh `
+  --arxiv-profile ./profiles/arxiv `
+  --hn-profile    ./profiles/hn `
+  --pkg-profile   ./profiles/pkg `
+  --pwc-profile   ./profiles/pwc `
+  --hf-profile    ./profiles/hf `
+  --s2-profile    ./profiles/s2 `
+  --so-profile    ./profiles/so `
+  --proxy http://127.0.0.1:7890
+
+# 指定 Chrome 路径
+$env:CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+.\build-cdp\Release\research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
+
+# Linux
+CHROME_PATH=/usr/bin/google-chrome-stable ./build-cdp/research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
+```
+
+### CDP 后端架构
+
+```
+research-mcp.exe
+  ├─ Init(): launch_chrome() → CreateProcessW/fork-exec
+  │           Chrome --remote-debugging-port=9222
+  │           --user-data-dir=./profiles/<source>   (每源独立目录)
+  │           --headless=new --disable-gpu ...
+  ├─ poll http://127.0.0.1:9222/json/version (循环, 最多 5s)
+  ├─ GET  http://127.0.0.1:9222/json → 拿 Page 的 wsUrl
+  ├─ connect_websocket():
+  │    ├─ TCP connect (Winsock2 / POSIX socket, 5s 超时)
+  │    ├─ 构造 HTTP WebSocket upgrade:
+  │    │    GET /devtools/page/<id> HTTP/1.1
+  │    │    Upgrade: websocket
+  │    │    Sec-WebSocket-Key: <随机 16B base64>
+  │    │    Sec-WebSocket-Version: 13
+  │    └─ 验证 `101 Switching Protocols`
+  ├─ send_cdp_command(method, params):
+  │    ├─ 手写 WebSocket 帧: opcode=0x01 (TEXT), FIN=1, MASK=1
+  │    │    mask key 随机 4B, payload 逐字节 XOR
+  │    ├─ send() 循环直到全部发完
+  │    └─ 返回 {id:N, method, params} JSON
+  ├─ recv_cdp_response(expected_id):
+  │    ├─ 读帧头, 处理 FIN 位 + 分片 continuation (opcode=0x00)
+  │    ├─ opcode=0x09 (ping) → 自动回 pong
+  │    ├─ opcode=0x08 (close) → 关闭
+  │    ├─ 累积 `frag_buf` 跨分片拼接
+  │    ├─ 跳过事件帧(无 id): Page.frameStartedLoading 等
+  │    └─ 找到匹配 id → 返回完整 JSON
+  ├─ Navigate(url): send_cdp("Page.navigate", {url:...}) → 等 Page.loadEventFired
+  └─ ExecuteScript(js): send_cdp("Runtime.evaluate", {expression, returnByValue})
+```
+
+### CDP vs WebView2 对比
+
+| 维度 | WebView2 | CDP |
+|---|---|---|
+| 平台 | Windows 10/11 | Windows / Linux / macOS |
+| GUI 依赖 | 需要 Edge Runtime | 零 GUI, 纯 headless |
+| Chromium 版本 | 跟随系统 Edge | 跟随独立 Chrome 可执行文件 |
+| 进程模型 | 嵌入同一进程的 WebView | 独立 Chrome 进程 (PID 记录, Destroy 时 kill) |
+| 通信方式 | WebView2 C++ API 同步回调 | 原生 socket + WebSocket 帧 + CDP JSON |
+| 代理隔离 | 由系统/Chrome 决定 | `--proxy` 显式传入 + `CURLOPT_NOPROXY` 确保 loopback 不走代理 |
+| 适合场景 | Windows 桌面应用、CI 少 | Linux 服务器、GitHub Actions、容器、CI 大规模 |
+
+### CDP 后端已知坑 & 修复
+
+| 坑 | 修复 |
+|---|---|
+| `curl_ws_send` 永远失败 (Chrome 回 RST) | 放弃 curl WebSocket 高层 API, 改用原生 Winsock2 + 手写 WS 帧 |
+| Chrome 回 `10053 WSAECONNABORTED` (TCP RST) | **opcode 用了 0x82 (BINARY)** — CDP 协议只接受 0x81 (TEXT), payload 是 UTF-8 JSON |
+| `Page.navigate` 超时, Chrome 不发 id=N 响应 | Chrome 发了**分片帧** (FIN=0 + opcode=0x00 continuation), 之前没拼接 |
+| 代理活着时一切 OK, 代理死了 Page.navigate 同步响应都发不出来 | 不是代码 bug — Chrome 整个网络栈被代理卡死, `--proxy` 必须确保代理存活或不加 |
+| WebSocket upgrade 后 Chrome 立即 exit | `CREATE_NO_WINDOW` 标志导致 headless Chrome 立即退出; CreateProcessW 不传此标志 |
+| UTF-8 命令行乱码 | `MultiByteToWideChar(CP_UTF8, ...)` 手动做 UTF-8→UTF-16, 不能 unsafe char cast |
+
+### 2026-09-10 端到端验证(CDP 后端, 无代理)
+
+```
+research-mcp.exe --port 8788 --arxiv-profile ./profiles/arxiv
+curl -X POST http://127.0.0.1:8788/mcp -d '{...arxiv_search_papers...}'
+
+[cdp] Chrome launched, PID=15788
+[cdp] CDP ready on port 9222
+[cdp] WebSocket connected
+[cdp] SEND Page.enable   → RECV {id:1, result:{}}    ✅
+[cdp] SEND Runtime.enable → RECV {id:2, result:{}}   ✅
+[cdp] SEND Page.navigate → RECV {id:3, result:{frameId}} ✅ (3.08s)
+[cdp] RECV Page.frameStartedLoading / Page.loadEventFired ✅ (4.0s)
+[cdp] SEND Runtime.evaluate → RECV result 35215 bytes  ✅ (7077ms total)
+返回: arxiv.org 完整 HTML, 几十篇 transformer 相关论文标题/摘要/链接
+```
 
 ## 启动
 
