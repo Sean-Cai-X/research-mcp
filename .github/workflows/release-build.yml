@@ -166,47 +166,39 @@ jobs:
       - name: 列下载内容
         run: ls -la artifacts/
 
-      - name: 生成变更日志
-        run: |
-          cat > notes.md << 'EOF'
-## 🚀 新增 CDP 跨平台浏览器后端
-
-### 后端对比
-
-| 维度 | Windows WebView2 | Windows CDP | Linux CDP |
-|------|------------------|-------------|-----------|
-| 需要 Edge Runtime | ✅ | ❌ | ❌ |
-| 需要 Chrome | ❌ | ✅ | ✅ |
-| 体积 | 大 | 小 | 小 |
-| 进程模型 | 嵌入 | 独立 Chrome | 独立 Chrome |
-
-### 快速启动
-
-```bash
-# Windows CDP
-./research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
-
-# Linux CDP (需 CHROME_PATH 或系统 Chrome)
-CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
-```
-
-### 下载
-
-- **Windows WebView2**: 仅推荐有 Edge Runtime 的 Windows 10/11 用户
-- **Windows CDP / Linux CDP**: 下载对应平台的 CDP 版
-
-### 源码
-
-GitHub Release 自动附带 `Source code (zip)` / `Source code (tar.gz)`
-EOF
-
       - name: 创建 Release 并上传制品
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          body_path: notes.md
           generate_release_notes: false
           draft: false
           prerelease: false
+          body: |
+            ## 🚀 v0.3.5: CI 修复 + CDP 跨平台后端
+
+            ### 后端对比
+
+            | 维度 | Windows WebView2 | Windows CDP | Linux CDP |
+            |------|------------------|-------------|-----------|
+            | 需要 Edge Runtime | ✅ | ❌ | ❌ |
+            | 需要 Chrome | ❌ | ✅ | ✅ |
+            | 体积 | 大 | 小 | 小 |
+            | 进程模型 | 嵌入 | 独立 Chrome | 独立 Chrome |
+
+            ### 快速启动
+
+            ```bash
+            # Windows CDP
+            ./research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
+
+            # Linux CDP (需 CHROME_PATH 或系统 Chrome)
+            CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
+            ```
+
+            ### 下载说明
+
+            - **Windows WebView2**: 推荐有 Edge Runtime 的 Windows 10/11 用户
+            - **Windows CDP / Linux CDP**: 下载对应平台 CDP 版（需系统已安装 Chrome）
+            - **源码包**: GitHub Release 自动附带 Source code (zip) / (tar.gz)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
