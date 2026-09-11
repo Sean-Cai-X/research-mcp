@@ -349,7 +349,7 @@ json ToolResearchDeepDive(IBrowserSession* web_session, const json& args) {
             {"max_comment_count", 120},
             {"text_max_chars", 30000}
         };
-        seed_payload = ToolHnFetchDetailedStory((*web_session), hn_args);
+        seed_payload = ToolHnFetchDetailedStory(hn_args);
         // Tool 返回格式是 WrapMcpResult: {content:[{type:"text",text:"..."}]}
         // 解包出实际 payload(由 caller 的 MCP 包装一致性决定)
         // 这里解到 payload 层即可: 如果有 content[0].text 且是 JSON 字符串则 parse
@@ -404,7 +404,7 @@ json ToolResearchDeepDive(IBrowserSession* web_session, const json& args) {
 
         // 1) 拉取 HN 前 20 条故事索引
         json top_args = {{"count", 20}};
-        json top_wrapped = ToolHnGetTopStories((*web_session), top_args);
+        json top_wrapped = ToolHnGetTopStories(top_args);
         json top_payload = unwrap_mcp_content(top_wrapped);
         json top_stories = json::array();
         if (top_payload.is_object() && top_payload.contains("stories") &&
@@ -446,7 +446,7 @@ json ToolResearchDeepDive(IBrowserSession* web_session, const json& args) {
                     {"max_comment_count", 60},
                     {"text_max_chars", 20000}
                 };
-                json detail_wrapped = ToolHnFetchDetailedStory((*web_session), detail_args);
+                json detail_wrapped = ToolHnFetchDetailedStory(detail_args);
                 json detail_payload = unwrap_mcp_content(detail_wrapped);
                 if (!detail_payload.is_object()) continue;
                 collect_urls_from_hn(detail_payload, url_scores, url_evidence);

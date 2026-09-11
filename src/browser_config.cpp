@@ -42,6 +42,7 @@ BrowserConfig::BrowserConfig() {
 void BrowserConfig::reset_to_builtin_defaults() {
     chrome = ChromeConfig();
     cdp = CdpConfig();
+    cdp.connect_timeout_ms = 5000;  // 从 1500ms 延长到 5000ms
     session = SessionConfig();
     proxy = ProxyConfig();
     extensions = ExtensionsConfig();
@@ -343,11 +344,9 @@ std::string BrowserConfig::build_chrome_command(
     const std::string& extra_args_append)
 {
     std::string args;
-
     // ---- 核心 CDP 参数 ----
     args += " --remote-debugging-port=" + std::to_string(port);
     args += " --user-data-dir=\"" + user_data_dir + "\"";
-
     // ---- 无头模式 ----
     if (chrome.headless_mode == "new") {
         args += " --headless=new";
@@ -355,51 +354,50 @@ std::string BrowserConfig::build_chrome_command(
         args += " --headless";
     }
     // "disabled" = 不加 headless 参数
-
     // ---- 窗口尺寸 ----
     args += " --window-size=" + std::to_string(chrome.window_size[0])
           + "," + std::to_string(chrome.window_size[1]);
-
     // ---- 稳定性参数 (总是加, 无害) ----
     args += " --no-first-run";
     args += " --no-default-browser-check";
     args += " --disable-blink-features=AutomationControlled";
     args += " --disable-dev-shm-usage";
-
     if (chrome.disable_gpu) args += " --disable-gpu";
     if (chrome.no_sandbox)  args += " --no-sandbox";
-
     // ---- Wayland ----
     if (is_wayland() && chrome.headless_mode == "disabled") {
         args += " --ozone-platform=wayland";
     }
-
     // ---- 缓存 ----
     if (!session.enable_cache) args += " --disk-cache-dir=/dev/null";
     if (session.clear_cache_on_start) args += " --disk-cache-dir=/dev/null";
-
     // ---- 代理 (优先级: extra_proxy > proxy.server) ----
     std::string effective_proxy = extra_proxy.empty() ? proxy.server : extra_proxy;
     if (!effective_proxy.empty()) {
         args += " --proxy-server=\"" + effective_proxy + "\"";
+        // ========== 核心修正：本地回环绕过代理，Chrome 规范用分号分隔 ==========
+        args += " --proxy-bypass-list=\"localhost;127.0.0.1;::1";
+        // 追加配置文件中的自定义 bypass 列表
+        if (!proxy.bypass_list.empty()) {
+            for (const auto& item : proxy.bypass_list) {
+                args += ";" + item;
+            }
+        }
+        args += "\"";
     }
-
     // ---- 扩展加载 ----
     for (const auto& ep : extensions.load_paths) {
         args += " --load-extension=\"" + ep + "\"";
     }
-
     // ---- extra_args (用户配置) ----
     for (const auto& a : chrome.extra_args) {
         args += " " + a;
     }
-
     // ---- 调用方额外追加 ----
     if (!extra_args_append.empty()) args += " " + extra_args_append;
-
     args += " about:blank";
-
     return chrome_bin + args;
 }
+
 
 } // namespace github_research

@@ -1,16 +1,15 @@
-# github-research-mcp (DeerFlow++)
+﻿# github-research-mcp (DeerFlow++)
 
-9 源统一研究 MCP 服务,基于 **可切换浏览器后端(libcurl + WebView2 | libcurl + CDP)** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
+9 源统一研究 MCP 服务,**全链路纯 HTTP REST**(libcurl 完成所有核心工具调用)+ **可选浏览器后端**(CDP / WebView2 仅用于 Wiki Explorer / Research Deep Dive 网页兜底)+ **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
 
 ## 特性
 
-- **9 源 71 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
-- **混合技术栈(各取所长)**:GitHub REST API 走 **libcurl**(轻量、无浏览器进程残留),7 个网页源走浏览器后端
-- **浏览器后端可切换**:CMake 开关 `RESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2`(默认,Windows 专属) 或 `CDP`(跨平台,零 GUI 依赖,独立 Chrome 进程 + DevTools Protocol)
+- **9 源 62 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
+- **全链路纯 HTTP REST**:所有源的核心工具均通过 libcurl + 官方 API / HTML 页面实现,**零浏览器依赖,启动即用,无进程残留**
+- **可选浏览器后端**(仅补充场景):CMake 开关 `RESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2`(Windows 专属) 或 `CDP`(跨平台)。启用后可获得 **Wiki Explorer 通用网页爬取** + **HN 深度文章兜底抓取**能力
 - **CDP 后端原理**:启动独立 Chrome `--remote-debugging-port`,原生 Winsock2/POSIX socket 手写 WebSocket 帧(opcode=1 TEXT),CDP JSON 直接双向通信;自动处理分片帧拼接、ping/pong、代理隔离
 - **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
 - **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
-- **多实例会话隔离**:每个网页源独立 `WebViewSession` + 独立 user data dir,避免 Cookie / 缓存共享;**主源失败不影响备用源**
 - **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
 - **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
 - **统一 SQLite 缓存层(WAL + 20 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + **定向知识雷达 6 张表**(focuses / focus_members / attributes / gaps / extraction_jobs / track_schedules)
@@ -108,7 +107,7 @@ From Serial → Parallel Inference
 
 ## 架构
 
-### 混合技术栈(libcurl + WebView2)+ 三层观测体系
+### 全链路纯 HTTP REST + 三层观测体系
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -118,8 +117,8 @@ From Serial → Parallel Inference
                  ▼
 ┌────────────────────────────────────────────────────────────────┐
 │  dispatch_<source>_tool  (按工具名前缀路由)                      │
-│  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (4) /          │
-│  pwc_*   (5) / hf_*   (9) / s2_*    (7) / so_*    (6)          │
+│  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (5) /          │
+│  pwc_*   (6) / hf_*   (9) / s2_*    (7) / so_*    (6)          │
 │  + github_module_timeline_analysis (L2/L3)                      │
 │  + github_subdir_timeline_slice    (原语A:子模块切片)            │
 │  + github_maintenance_attribution  (原语B:维护链路归因)          │
@@ -131,13 +130,12 @@ From Serial → Parallel Inference
    ┌─────────────┼─────────────┬─────────────┬─────────────┐
    ▼             ▼             ▼             ▼             ▼
 ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐
-│GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ ...  │
-│Client│ │Session│ │混合  │ │Session│ │Session│ │ ...
-│libcurl│ │WebView2│ │后端  │ │WebView2│ │WebView2│ │
-│  +   │ │  +   │ │Firebase│ │      │ │      │ │
-│Cache │ │Cache │ │API + │ │Cache │ │Cache │ │
-│      │ │Entity │ │WebView2│ │      │ │      │ │
-│      │ │       │ │兜底  │ │      │ │      │ │
+│GitHub│ │arXiv │ │  HN  │ │ Pkg  │ │ PWC  │ │ HF/S2/│
+│Client│ │纯HTTP│ │纯HTTP│ │纯HTTP│ │纯HTTP│ │ SO   │
+│libcurl│ │+API  │ │Firebase│ │+API  │ │+API  │ │纯HTTP│
+│  +   │ │+HTML │ │+Algolia│ │+HTML │ │+HTML │ │+API  │
+│Cache │ │Cache │ │+curl  │ │Cache │ │Cache │ │Cache │
+│      │ │Entity │ │+Cache │ │Entity │ │Entity │ │Entity│
 └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
    │        │        │        │        │        │
    └────────┴────────┴────────┴────────┴────────┘
@@ -146,68 +144,78 @@ From Serial → Parallel Inference
         ▼                                 ▼
 ┌──────────────────┐         ┌──────────────────────────┐
 │ libcurl 8.20     │         │  SQLite 统一缓存层         │
-│ (GitHub API)     │         │  - cache_entries/blobs    │
-│ + WebView2 基类   │         │  - entities / relations   │
-│ (7 网页源)        │         │  - metrics (时间序列)      │
-│ Navigate+ExecScript         │  + source_fusion           │
-│                  │         │  + circuit breaker         │
+│ 所有源核心调用     │         │  - cache_entries/blobs    │
+│ (GitHub API,     │         │  - entities / relations   │
+│  arXiv API, HN   │         │  - metrics (时间序列)      │
+│  Firebase/Algolia│         │  + source_fusion           │
+│  npm/pypi API...)│         │  + circuit breaker         │
 │                  │         │  + fallback chain          │
-└──────────────────┘         └──────────────────────────┘
-                                       │
-                                       ▼
-                          ┌──────────────────────────┐
-                          │  三层观测体系              │
-                          │  L1: 项目概览 (github_*)  │
-                          │  L2: 单点深挖 (timeline)   │
-                          │  L3: 关联图谱 (跨源)       │
-                          └──────────────────────────┘
+└────────┬─────────┘         └──────────────────────────┘
+         │                                  │
+         │  (可选, CMake 开关启用)          │
+         ▼                                  ▼
+┌──────────────────┐         ┌──────────────────────────┐
+│ 浏览器后端        │         │  三层观测体系              │
+│ CDP / WebView2   │         │  L1: 项目概览 (github_*)  │
+│ 仅补充场景:       │         │  L2: 单点深挖 (timeline)   │
+│ - Wiki Explorer  │         │  L3: 关联图谱 (跨源)       │
+│ - HN 外部文章兜底 │         └──────────────────────────┘
+└──────────────────┘
 ```
 
-> **HN 特殊架构**:索引类工具(`hn_get_top_stories` / `hn_get_new_stories` / `hn_get_best_stories` / `hn_get_latest_index`)优先走 Hacker News Firebase REST API(`hacker-news.firebaseio.com/v0/`)——纯 libcurl HTTP,无需 WebView2,响应 <500ms,支持批量 item 详情缓存。WebView2 仅作为兜底(API 不可用时回退爬 `news.ycombinator.com`)。深度类工具(`hn_get_item` / `hn_search_by_keyword` / `hn_fetch_detailed_story`)仍需 WebView2 导航 HN 页面或外部文章。
+> **HN 纯 HTTP 架构**:全部 7 个 `hn_*` 工具均通过 libcurl 实现,无需浏览器依赖:
+> - **索引类**(`hn_get_top_stories` / `hn_get_new_stories` / `hn_get_best_stories` / `hn_get_latest_index`):Hacker News Firebase REST API(`hacker-news.firebaseio.com/v0/`),响应 <500ms,支持批量 item 详情缓存
+> - **搜索类**(`hn_search_by_keyword`):HN Algolia Search API(`hn.algolia.com/api/v1/search`)
+> - **详情类**(`hn_get_item` / `hn_fetch_detailed_story`):Firebase item API + curl 抓取外部文章正文
+> - **零 WebView2 依赖**:HN 核心链路完全跑在 libcurl 上,启动即用,进程零残留
 
-### 调用模式(所有源统一)
+### 调用模式(全纯 HTTP,零浏览器)
 
-1. `Navigate(url)` —— 导航到目标 URL
-2. `WaitForNavigation(timeoutMs)` —— 等待 NavigationCompleted(pump 消息循环)
-3. `ExecuteScript(kJsExtractRawPage)` —— 执行统一 JS 提取原始页面文本
-4. 返回 `{success, url, title, text, html}` 给 MCP 客户端,AI 自行解析
-5. **缓存层透明拦截**:成功/失败都写入 SQLite,下次同 URL 命中直接返回
-6. **Entity Mapper 自动注册**:成功结果自动抽取实体字段、建立关系、记录时间快照
-
-**统一 JS 脚本** `kJsExtractRawPage`(定义在 `webview_helpers.hpp`):
-
-```javascript
-(function(){
-    var text = document.body ? document.body.innerText : "";
-    if(text.length > 50000) text = text.substring(0, 50000);
-    var html = document.documentElement.outerHTML;
-    if(html.length > 50000) html = html.substring(0, 50000);
-    return JSON.stringify({
-        success: true,
-        url: window.location.href,
-        title: document.title || "",
-        text: text,
-        html: html
-    });
-})();
+```
+MCP Client  →  JSON-RPC  →  dispatch_<source>_tool(args)
+                               │
+                               ▼
+                         Tool*Tool(args)   ← 无 session 参数,纯函数
+                               │
+                               ▼
+                    CurlHttpClient::get(url, headers)
+                               │
+                               ▼
+                    HTTP 响应 → JSON 解析 → CacheManager 写入
+                               │
+                               ▼
+                    CleanerPipeline 标准化 → EntityMapper 注册
+                               │
+                               ▼
+                    MCP 包装 {content: [{type:"text", text: json}], isError: false}
 ```
 
-**设计理念**:工具只负责"取到页面内容",解析交给 AI。避免为每个站点维护复杂 DOM 选择器,降低维护成本。
+**设计理念**:
+1. **纯函数工具签名** — `Tool*Tool(const json& args) → json`,无状态、无 session 依赖,便于缓存层透明拦截
+2. **libcurl 统一 HTTP 层** — 所有源共享 `CurlHttpClient`,连接池、超时、代理、重试策略一致
+3. **DOM 解析交给 AI** — 工具只负责 HTTP 请求 + 原始 JSON/HTML,AI 自行理解内容
 
-**不使用** `fetch()` / `XMLHttpRequest`(WebView2 ExecuteScript 不 await Promise,同步 XHR 被 Chromium 限制)。
+### 会话管理(仅浏览器后端启用时有意义)
 
-### 会话隔离(每个源独立 WebView2 + user data dir)
+所有核心工具已全纯 HTTP,**不需要 profile/user-data-dir 参数**。浏览器后端仅在以下场景提供补充抓取能力:
 
-| 源 | 类 | user data dir 参数 | 数据源 ID | 索引类 | 深度类 |
-|---|---|---|---|---|---|
-| GitHub | `WebViewClient`(基于 `WebViewSession`) | `--gh-profile` | `github_api` | — | — |
-| arXiv | `WebViewSession` | `--arxiv-profile` | `arxiv_web` | — | — |
-| Hacker News | `WebViewSession` + **Firebase REST**(新增) | `--hn-profile`(深度类) | `hn_web` / `hn_fb_list` / `hn_fb_item` | Firebase API | WebView2 |
-| npm/PyPI | `WebViewSession` | `--pkg-profile` | `pkg_web` | — | — |
-| Papers with Code | `WebViewSession` | `--pwc-profile` | `pwc_web` | — | — |
-| Hugging Face | `WebViewSession` | `--hf-profile` | `hf_web` | — | — |
-| Semantic Scholar | `WebViewSession` | `--s2-profile` | `s2_web` | — | — |
-| Stack Overflow | `WebViewSession` | `--so-profile` | `so_web` | — | — |
+| 场景 | 是否需要浏览器后端 | 说明 |
+|---|---|---|
+| 9 源核心工具(62 个) | ❌ 不需要 | 全部 libcurl + API |
+| Wiki Explorer (`wiki_discover` / `wiki_read` / `wiki_scan`) | ❌ 不需要 | Kiwix 本地 HTTP server |
+| 通用网页爬取(`web_crawler` priority 4) | ✅ 需要 | CDP/WebView2 Navigate + ExecuteScript |
+| Web Search 深度爬取(priority 7) | ✅ 需要 | CDP/WebView2 Navigate + ExecuteScript |
+| HN 外部文章兜底(极罕见) | ✅ 需要 | CDP/WebView2 Navigate |
+
+如需启用浏览器后端,通过 CMake 开关选择:
+
+```powershell
+# CDP (跨平台,推荐)
+cmake -DRESEARCH_MCP_BROWSER_BACKEND=CDP ..
+
+# WebView2 (Windows 专属)
+cmake -DRESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2 ..
+```
 
 ## 统一 SQLite 缓存层(WAL + 20 张表)
 
@@ -399,11 +407,11 @@ Wiki Explorer 作为第 9 号源,引入 **Kiwix 本地离线维基镜像** 作�
 |---|---|---|---|
 | 1 | `kiwix_local` | Kiwix 本地离线维基服务器(最高优先级) | HTTP REST (Kiwix serve) |
 | 2 | `git_raw` | Git 仓库 raw 文件直链 | libcurl HTTP |
-| 3 | `github_wiki` | GitHub Wiki 页面 | WebView2 |
-| 4 | `web_crawler` | 通用网页爬虫(任意 URL) | WebView2 |
+| 3 | `github_wiki` | GitHub Wiki 页面 | libcurl HTTP(通用抓取) / 浏览器后端补充 |
+| 4 | `web_crawler` | 通用网页爬虫(任意 URL) | 浏览器后端 CDP/WebView2 |
 | 5 | `github_api` | GitHub REST API(主源) | libcurl |
-| 6 | `arxiv` | arXiv 论文库 | WebView2 |
-| 7 | `web_search` | Web 搜索引擎(SERP) | WebView2 |
+| 6 | `arxiv` | arXiv 论文库 | **纯 HTTP**(arXiv API + HTML) |
+| 7 | `web_search` | Web 搜索引擎(SERP) | 浏览器后端 CDP/WebView2 |
 | 8 | `local_fs` | 本地文件系统扫描 | 原生 C++ 文件 IO |
 | 9 | `git_clone` | Git clone 完整仓库 | libgit2 / shell 调用 |
 
@@ -511,7 +519,7 @@ Kiwix 本地服务器通过以下方式之一指定(优先级同代理设置):
 │    - paper  → cites + cited_by + authors.other_papers    │
 │    - project→ deps + used_by + author.other_projects     │
 │    - person → recent_papers + participated_projects      │
-│    调用现有 71 个检索工具做定向查询                        │
+│    调用现有 60+ 个检索工具做定向查询                        │
 │                                                          │
 │ 3. 对每个候选实体,算相关性分数                            │
 │    relevance = 0.4 × keyword_overlap                     │
@@ -711,7 +719,7 @@ $r.result.content[0].text
 核心就三句话:
 
 1. **属性级别的增量存储** — `attributes` 表不是"一个实体一条记录",而是"一个属性一条记录,多源可重复",让信息可以一条一条地补
-2. **窄操作提取** — 一次一个属性,强制 JSON,失败重试,让小模型也能可靠贡献(已有 71 个检索工具直接当"发现邻居的手"来用)
+2. **窄操作提取** — 一次一个属性,强制 JSON,失败重试,让小模型也能可靠贡献(已有 60+ 个检索工具直接当"发现邻居的手"来用)
 3. **缺口驱动的定向调度** — `gaps` 表 + 状态机 + 自适应间隔,让抓取有方向地蔓延,而不是盲目重复
 
 ## 二进制程序下载(无需自行编译)
@@ -720,7 +728,7 @@ $r.result.content[0].text
 
 1. 前往 [Releases](../../releases) 页面
 2. 下载 `research-mcp-windows-x64.zip`
-3. 解压后直接运行 `research-mcp.exe`(zip 内已附带 `WebView2Loader.dll` + `libcurl-x64.dll` + `curl-ca-bundle.crt`)
+3. 解压后直接运行 `research-mcp.exe`(zip 内已附带 `curl-ca-bundle.crt`)
 
 启动示例(解压目录下):
 
@@ -738,33 +746,37 @@ $r.result.content[0].text
 
 ## 环境要求(自行编译时)
 
-### WebView2 后端(默认,Windows 专属)
+### 核心工具(推荐,默认)
+
+- Windows / Linux / macOS 任意 C++17 编译器(MSVC 2022 / GCC 12+ / Clang 16+)
+- CMake 3.21+
+- **零外网下载**:curl 8.20 源码已内置 `third_party/curl-8.20.0/`,nlohmann/json 由 FetchContent 拉取(GitHub Actions 会在 workflow cache 中预热)
+
+### 可选浏览器后端:CDP(跨平台补充场景)
+
+- Chrome / Chromium 可执行文件(机器任意安装路径,或通过 `CHROME_PATH` 环境变量指定)
+- 不需要 WebView2 / Edge Runtime / GUI 组件
+
+### 可选浏览器后端:WebView2(Windows 专属补充场景)
 
 - Windows 10/11 x64
 - Edge Runtime(Win10/11 自带)
 - Visual Studio 2022(C++ 桌面开发 + Windows 11 SDK)
-- CMake 3.16+
-
-### CDP 后端(跨平台,推荐 Linux / macOS / CI)
-
-- Windows / Linux / macOS 任意 C++20 编译器(MSVC 2022 / GCC 12+ / Clang 16+)
-- CMake 3.16+
-- **Chrome / Chromium 可执行文件**(机器任意安装路径,或通过 `CHROME_PATH` 环境变量指定)
-- 不需要 WebView2 / Edge Runtime / GUI 组件
 
 ## 依赖
 
-| 依赖 | 获取方式 |
-|---|---|
-| WebView2 SDK | NuGet 包 `Microsoft.Web.WebView2`,解压到 `third_party/WebView2/`(仅 WEBVIEW2 后端) |
-| Chrome / Chromium | 系统预装,或通过 `CHROME_PATH` 环境变量指定(仅 CDP 后端) |
-| nlohmann/json | vcpkg 安装,或单 header 放到 `third_party/json/include/` |
-| libcurl v8.20+ | CDP 后端使用 curl 完成 HTTP 请求 + Chrome 进程启动(可选代理隔离) |
-| SQLite | 源码已内置 `third_party/sqlite/sqlite3.c` |
+| 依赖 | 获取方式 | 说明 |
+|---|---|---|
+| libcurl 8.20 | **本地源码** `third_party/curl-8.20.0/`(静态编译,Schannel TLS) | 所有源核心 HTTP 请求 |
+| nlohmann/json | FetchContent 从 GitHub 拉取 | JSON 序列化/反序列化 |
+| SQLite | **本地源码** `third_party/sqlite/sqlite3.c`(已内置) | 统一缓存层 |
+| WebView2 SDK | FetchContent 从 NuGet 下载(仅 WEBVIEW2 后端) | Windows 浏览器后端 |
+| Chrome / Chromium | 系统预装(仅 CDP 后端) | 跨平台浏览器后端 |
 
 ## 构建
 
 ```powershell
+# 默认构建 (零浏览器后端, 所有核心工具可用)
 cd D:\DeerFlow\DeerFlow++
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
@@ -772,10 +784,9 @@ cmake --build build --config Release
 
 构建产物:
 - `build/Release/research-mcp.exe`
-- `build/Release/WebView2Loader.dll`
 - `build/tests/Release/test_smoke.exe`
 
-### CDP 后端构建(跨平台)
+### 启用 CDP 浏览器后端(跨平台,补充场景)
 
 ```powershell
 # Windows (PowerShell)
@@ -788,29 +799,36 @@ cmake --build build-cdp -j$(nproc)
 ```
 
 构建产物:
-- `build-cdp/Release/research-mcp.exe` / `build-cdp/research-mcp`(无 WebView2Loader.dll, 零 GUI)
+- `build-cdp/Release/research-mcp.exe` / `build-cdp/research-mcp`
 
-### CDP 后端运行
+### 启用 WebView2 浏览器后端(Windows 专属)
 
 ```powershell
-# Windows: 默认路径可自动发现 Chrome (C:\Program Files\Google\Chrome\Application\chrome.exe)
-.\build-cdp\Release\research-mcp.exe --port 8771 `
-  --gh-profile    ./profiles/gh `
-  --arxiv-profile ./profiles/arxiv `
-  --hn-profile    ./profiles/hn `
-  --pkg-profile   ./profiles/pkg `
-  --pwc-profile   ./profiles/pwc `
-  --hf-profile    ./profiles/hf `
-  --s2-profile    ./profiles/s2 `
-  --so-profile    ./profiles/so `
-  --proxy http://127.0.0.1:7890
+cmake -B build-webview2 -S . -DCMAKE_BUILD_TYPE=Release -DRESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2
+cmake --build build-webview2 --config Release
+```
 
-# 指定 Chrome 路径
+构建产物:
+- `build-webview2/Release/research-mcp.exe`
+- `build-webview2/Release/WebView2Loader.dll`
+
+### 浏览器后端运行
+
+浏览器后端**仅在以下场景需要启动**:
+- 使用 Wiki Explorer 的通用网页爬取(`web_crawler`)
+- 使用 Web Search 的深度爬取
+- HN 外部文章兜底抓取(极罕见,Firebase + curl 已覆盖 99% 场景)
+
+```powershell
+# Windows CDP: 启动自动发现 Chrome,零配置
+.\build-cdp\Release\research-mcp.exe --port 8771 --proxy http://127.0.0.1:7890
+
+# 指定 Chrome 路径 (CDP)
 $env:CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-.\build-cdp\Release\research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
+.\build-cdp\Release\research-mcp.exe --port 8771
 
-# Linux
-CHROME_PATH=/usr/bin/google-chrome-stable ./build-cdp/research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
+# Linux CDP
+CHROME_PATH=/usr/bin/google-chrome-stable ./build-cdp/research-mcp --port 8771
 ```
 
 ### CDP 后端架构
@@ -889,50 +907,36 @@ curl -X POST http://127.0.0.1:8788/mcp -d '{...arxiv_search_papers...}'
 
 ## 启动
 
-### 单源模式(仅 GitHub,向后兼容)
+### 零配置启动(9 源核心工具默认全启用)
+
+所有 62 个核心工具全纯 HTTP,**不需要任何 profile 参数**,启动即用:
 
 ```powershell
-.\research-mcp.exe --port 9876 --proxy http://127.0.0.1:7897
+# 最简启动 (stdio 模式)
+.\research-mcp.exe
+
+# HTTP 模式 (推荐)
+.\research-mcp.exe --port 8765
+
+# 带代理
+.\research-mcp.exe --port 8765 --proxy http://127.0.0.1:7897
+
+# 启用 Kiwix 本地维基 (可选,零配置也能用 8 源)
+.\research-mcp.exe --port 8765 --kiwix-url http://127.0.0.1:8080 --proxy http://127.0.0.1:7897
 ```
 
-### arXiv + HN 双源模式(推荐最小化验证)
-
-```powershell
-.\research-mcp.exe --port 8765 `
-  --arxiv-profile ./profiles/arxiv `
-  --hn-profile    ./profiles/hn `
-  --proxy http://127.0.0.1:7897
-```
-
-### 9 源全量模式(推荐)
-
-```powershell
-.\research-mcp.exe --port 8765 `
-  --gh-profile    ./profiles/gh `
-  --arxiv-profile ./profiles/arxiv `
-  --hn-profile    ./profiles/hn `
-  --pkg-profile   ./profiles/pkg `
-  --pwc-profile   ./profiles/pwc `
-  --hf-profile    ./profiles/hf `
-  --s2-profile    ./profiles/s2 `
-  --so-profile    ./profiles/so `
-  --kiwix-url     http://127.0.0.1:8080 `
-  --proxy http://127.0.0.1:7897
-```
-
-启动成功日志:
+### 启动成功日志
 
 ```
-[cache] ready: {"blobs":1,"cache_entries":5,"entity_count":13,...}
+[cache] ready: {"blobs":0,"cache_entries":0,"entity_count":0,...}
 [mcp] proxy: http://127.0.0.1:7897
-[mcp] init arXiv session: ./profiles/arxiv
-[session] WebView2 ready, profile: ./profiles/arxiv
-[mcp] arXiv session ready
-[mcp] arxiv source_fetch callback registered
-[mcp] init HN session: ./profiles/hn
-[session] WebView2 ready, profile: ./profiles/hn
-[mcp] HackerNews session ready
-[mcp] hn source_fetch callback registered
+[mcp] arxiv source_fetch callback registered (pure HTTP)
+[mcp] hn source_fetch callback registered (pure HTTP)
+[mcp] npm+pypi source_fetch callbacks registered (pure HTTP)
+[mcp] pwc source_fetch callback registered (pure HTTP)
+[mcp] hf source_fetch callback registered (model + dataset, pure HTTP)
+[mcp] s2 source_fetch callback registered (pure HTTP)
+[mcp] so source_fetch callback registered (pure HTTP)
 [mcp] server starting in HTTP mode on port 8765
 [http] MCP server listening on http://127.0.0.1:8765/mcp (Ctrl+C to stop)
 ```
@@ -942,25 +946,24 @@ curl -X POST http://127.0.0.1:8788/mcp -d '{...arxiv_search_papers...}'
 | 参数 | 说明 |
 |---|---|
 | `--port <PORT>` | HTTP MCP server 端口(默认:stdio 模式) |
-| `--proxy <URL>` | 代理 URL(应用到所有 WebView 会话) |
+| `--proxy <URL>` | 代理 URL(libcurl HTTP 请求走代理;浏览器后端 Chromium 也同步走) |
 | `--kiwix-url <URL>` | Kiwix local server URL (e.g. http://127.0.0.1:8080) |
-| `--gh-profile <DIR>` | GitHub WebView user data dir(9 源隔离) |
-| `--arxiv-profile <DIR>` | 启用 arXiv WebView 会话 |
-| `--hn-profile <DIR>` | 启用 Hacker News WebView 会话 |
-| `--pkg-profile <DIR>` | 启用 npm/PyPI WebView 会话 |
-| `--pwc-profile <DIR>` | 启用 Papers with Code WebView 会话 |
-| `--hf-profile <DIR>` | 启用 Hugging Face WebView 会话 |
-| `--s2-profile <DIR>` | 启用 Semantic Scholar WebView 会话 |
-| `--so-profile <DIR>` | 启用 Stack Overflow WebView 会话 |
-| `--cache-smoke-test` | 运行 188 项缓存层烟雾测试(不依赖 WebView2) |
+| `--gh-profile <DIR>` | (CDP/WebView2 后端)GitHub user data dir |
+| `--arxiv-profile <DIR>` | (CDP/WebView2 后端)arXiv user data dir |
+| `--hn-profile <DIR>` | (CDP/WebView2 后端)HN user data dir |
+| `--pkg-profile <DIR>` | (CDP/WebView2 后端)npm/PyPI user data dir |
+| `--pwc-profile <DIR>` | (CDP/WebView2 后端)Papers with Code user data dir |
+| `--hf-profile <DIR>` | (CDP/WebView2 后端)Hugging Face user data dir |
+| `--s2-profile <DIR>` | (CDP/WebView2 后端)Semantic Scholar user data dir |
+| `--so-profile <DIR>` | (CDP/WebView2 后端)Stack Overflow user data dir |
+| `--cache-smoke-test` | 运行 188 项缓存层烟雾测试(不依赖浏览器后端) |
 | `--help` / `-h` | 显示帮助 |
 
-未指定 `--xxx-profile` 的源不启用,对应工具调用返回 `session not initialized`。
+> **注意**:核心工具(62 个)已全纯 HTTP,`--xxx-profile` 仅在启用了浏览器后端(CDP/WebView2)并需要通用网页爬取时才有意义。不指定 profile 时,所有核心工具正常工作。
 
 ## 代理设置
 
-WebView2 浏览器链路通过 Chromium 内核的 `--proxy-server` 命令行参数支持显式代理。
-代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
+libcurl HTTP 层通过统一配置支持代理;若启用了浏览器后端(CDP/WebView2),Chromium 也会同步走同一代理。代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
 
 ### 方式 1:命令行参数(推荐)
 
@@ -992,7 +995,7 @@ $env:HTTP_PROXY  = "http://127.0.0.1:7897"
 $body = '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 $r = Invoke-RestMethod -Uri http://127.0.0.1:8765/mcp -Method Post -ContentType 'application/json' -Body $body
 "tools count: $($r.result.tools.Count)"
-# → tools count: 90
+# → tools count: 75+
 ```
 
 ### arXiv 论文详情(支持 cache_hit)
@@ -1143,23 +1146,19 @@ $r.result.content[0].text
 | `arxiv_search_index` | 论文实体检索 |
 | `arxiv_fetch_paper_detail` | 论文详情 + cache_hit 标记 + entity_mapper 写入 |
 
-### Hacker News(7 个)
+### Hacker News(7 个,全纯 HTTP)
 
-| 工具 | 说明 | 后端 | 需要 `--hn-profile` |
-|---|---|---|---|
-| `hn_get_top_stories` | 头条故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
-| `hn_get_new_stories` | 最新故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
-| `hn_get_best_stories` | 精选故事 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
-| `hn_get_latest_index` | 最新索引快照 | **Firebase API** → WebView2 兜底 | ❌ 不需要 |
-| `hn_get_item` | 获取单个 item(故事 / 评论) | WebView2 | ✅ 需要 |
-| `hn_search_by_keyword` | 按关键词搜索 | WebView2(hn.algolia.com) | ✅ 需要 |
-| `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 | WebView2(导航 HN item 页 + 可选外部文章) | ✅ 需要 |
+| 工具 | 说明 | 后端 |
+|---|---|---|
+| `hn_get_top_stories` | 头条故事 | **Firebase REST API**(libcurl) |
+| `hn_get_new_stories` | 最新故事 | **Firebase REST API**(libcurl) |
+| `hn_get_best_stories` | 精选故事 | **Firebase REST API**(libcurl) |
+| `hn_get_latest_index` | 最新索引快照 | **Firebase REST API**(libcurl) |
+| `hn_get_item` | 获取单个 item(故事 / 评论) | **Firebase item API**(libcurl) |
+| `hn_search_by_keyword` | 按关键词搜索 | **Algolia HN Search API**(hn.algolia.com) |
+| `hn_fetch_detailed_story` | 故事详情 + 跨源 mentions 关系自动建立 | **Firebase item API** + curl 抓外部文章正文 |
 
-> **Firebase REST API**(`hacker-news.firebaseio.com/v0/`)是 HN 官方提供的免费、无认证、纯 JSON 接口:
-> - `/v0/topstories.json` / `/v0/newstories.json` / `/v0/beststories.json` → 最多 500 个 story ID 的数组
-> - `/v0/item/{id}.json` → 单个 item 完整详情(title/url/score/descendants/by/time/kids)
-> - 4 个索引工具批量获取 item 详情时,CacheManager 先查缓存(item TTL=12h,ID 列表 TTL=1h),命中直接返回,离线也可用
-> - 比 WebView2 爬页面快 **10 倍以上**(<500ms vs 3-5s),无页面结构依赖,稳定性大幅提升
+> HN 官方提供 **Firebase REST API**(`hacker-news.firebaseio.com/v0/`)和 **Algolia Search API**(`hn.algolia.com/api/v1/search`),全部纯 JSON、无认证,响应 <500ms。深度工具(`hn_fetch_detailed_story`)使用 curl 直接抓取外部文章 HTML 正文,零浏览器依赖。所有 7 个工具启动即用。
 
 ### npm / PyPI(5 个)
 
@@ -1349,7 +1348,7 @@ llama-server.exe ^
   --mcp http://127.0.0.1:8765/mcp
 ```
 
-挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 90 个工具注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
+挂载后 llama.cpp 自动执行 `initialize` 握手 → `tools/list`,把 75+ 个核心工具 + Focus 雷达注册为 `McpServer` tool 的子项,LLM 可通过 `McpServer(name="arxiv_search_papers", arguments={...})` 形式调用。
 
 ## 协议兼容性
 
@@ -1361,7 +1360,7 @@ llama-server.exe ^
 | 批量请求 | ✅ | JSON 数组形式的批量 JSON-RPC |
 | CORS | ✅ | 响应头 `Access-Control-Allow-Origin: *` |
 | OPTIONS 预检 | ✅ | 自动返回 200 |
-| `tools/list` | ✅ | 90 个工具(9 源 + Focus) |
+| `tools/list` | ✅ | 75+ 个核心工具 + Focus 雷达(9 源 + Focus) |
 | `tools/call` | ✅ | 支持 `isError` 字段标记失败 |
 | `ping` | ✅ | 心跳保活 |
 | `shutdown` | ✅ | 触发 server 优雅停止 |
@@ -1380,27 +1379,14 @@ GitHub 限流错误附带 `reset_at`:
 {"error":"rate limit exceeded","status_code":429,"reset_at":"1785724800"}
 ```
 
-会话未初始化错误:
-
-```json
-{"error":"ERROR: arXiv WebView session not initialized."}
-```
-
-WebView2 后端初始化失败(无 fallback):
-
-```json
-{"error":"WebView2 backend initialization failed (no fallback, single tech stack)","status_code":0,"url":"..."}
-```
-
 ## 故障排查
 
-### `WebView2 initialization timeout`
+### `libcurl: SSL certificate problem`
 
-Edge Runtime 缺失或被沙箱阻止。检查:
-1. `reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv` 应返回版本号
-2. 在非沙箱环境(真实 Windows 终端)运行
-3. 设置 `WEBVIEW2_USER_DATA_DIR` 环境变量到可写目录
-4. 显式指定 `--gh-profile` / `--arxiv-profile` 等参数,避免使用默认路径
+代理或 CA 证书问题。解决:
+1. 检查 `curl-ca-bundle.crt` 是否存在于 exe 同目录
+2. 设置 `--proxy http://host:port` 指向正确代理
+3. 检查 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量
 
 ### `HTTP 403`(GitHub)
 
@@ -1408,23 +1394,19 @@ GitHub API 限流(每小时 60 次/未认证)。解决:
 1. 设置 `GITHUB_TOKEN` 环境变量(Personal Access Token,每小时 5000 次)
 2. 等待限流重置(查看响应头 `X-RateLimit-Reset`)
 
-### `session not initialized`
+### 无浏览器后端 + 需要通用网页爬取
 
-对应源的 `--xxx-profile` 参数未指定。**注意**:部分工具已改为纯 HTTP,不再需要 WebView2:
-- ✅ **不需要 `--hn-profile`**: `hn_get_top_stories` / `hn_get_new_stories` / `hn_get_best_stories` / `hn_get_latest_index`(Firebase REST API)
-- ❌ **需要 `--hn-profile`**: `hn_get_item` / `hn_search_by_keyword` / `hn_fetch_detailed_story`
-- 其他源(arXiv / Pkg / PWC / HF / S2 / SO)的所有工具仍需 `--xxx-profile`
-
-### `fetch_result preview: {}`
-
-WebView2 ExecuteScript 不 await Promise 的已知问题。本服务已改用 `Navigate + ExecuteScript` 模式(读取 `document.body.innerText`),不再使用 `fetch()` / `XMLHttpRequest`。如仍出现此错误,请确认使用最新构建的 exe。
+如果启用了 CDP/WebView2 浏览器后端但 Chrome 无法启动:
+1. `CHROME_PATH` 环境变量是否指向正确路径
+2. Chrome 是否已安装(Windows 默认路径 `C:\Program Files\Google\Chrome\Application\chrome.exe`)
+3. 代理是否生效(CDP 需要 Chrome 进程能访问远程网页)
 
 ### 主源失败但备用源正常
 
 **这是设计预期行为**,不是 bug:
-- 每个 WebView 会话独立 user data dir,主源(GitHub)失败不影响 arXiv / HN 等备用源
-- 失败缓存写入 SQLite(TTL=1h),短时间内重复调用直接返回失败缓存,不再重复初始化 WebView2
+- libcurl HTTP 层自动熔断 + SQLite 失败缓存(TTL=1h),短时间内重复调用直接返回失败缓存
 - 调用 `set_fallback_policy` 配置降级链后,主源失败自动切换备用源
+- 所有源最终失败时返回陈旧缓存(stale cache)
 
 ## 测试
 
@@ -1484,7 +1466,7 @@ cmake --build build --config Release --target test_smoke
 | `arxiv_fetch_paper_detail` 二次调用 | `cache_hit=true` + `cache_expires_at` 时间戳 |
 | `hn_fetch_detailed_story` 返回 `source_url=arxiv.org` | 自动建立 `story -[mentions]-> paper` 跨源关系 |
 | `github_module_timeline_analysis` | 返回 `timeline_count > 0`(若仓库有近期提交) |
-| 主源 WebView2 失败时调用备用源 | 备用源(arXiv/HN)正常返回,主源错误隔离 |
+| 主源 HTTP 失败时自动切备用源 | 备用源(arXiv/HN)正常返回,主源错误隔离 |
 
 ## 与 DeerFlow 原版的差异
 
@@ -1773,10 +1755,10 @@ llama-server.exe ^
 | 验证项 | 结果 | 说明 |
 |---|---|---|
 | GET `/` | ✅ | 返回 9 源状态(GitHub=true,其余需 --xxx-profile) |
-| GET `/tools` | ✅ | 返回 90 个工具(完整列表) |
-| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 90 个工具,JSON-RPC id=1 正确匹配 |
+| GET `/tools` | ✅ | 返回 75+ 个核心工具 + Focus 雷达(完整列表) |
+| POST `/mcp` JSON-RPC `tools/list` | ✅ | 返回 75+ 个核心工具 + Focus 雷达,JSON-RPC id=1 正确匹配 |
 | 缓存层 188 项烟雾测试 | ✅ pass=188 fail=0 | EXIT_CODE=0 |
-| 完整 9 源 fetch 回调 | ✅ | 9 源 WebView2 session 全部 ready,proxy=http://127.0.0.1:7897 |
+| 完整 9 源 fetch 回调 | ✅ | 9 源纯 HTTP 回调全部注册成功,proxy=http://127.0.0.1:7897 |
 | `github_module_timeline_analysis` ingest_first=false | ✅ | timeline_count=3 (research-mcp 仓库 src/tools.cpp) |
 | `github_module_timeline_analysis` ingest_first=true + branch | ✅ | timeline_count=35 (cxvision 仓库 codex/cxcore-integration 分支, FastMatch 签名匹配) |
 

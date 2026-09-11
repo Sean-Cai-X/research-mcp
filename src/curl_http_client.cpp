@@ -164,11 +164,23 @@ HttpResponse CurlHttpClient::get(const std::string& url,
     if (!proxy_url_.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url_.c_str());
     }
-    // CA 证书:优先 exe 同目录的 curl-ca-bundle.crt,失败回退系统证书
+    // CA 证书:仅当 curl-ca-bundle.crt 存在时显式指定
+    // 否则让 curl 自动选择:TLS 后端(Windows Schannel/macOS SecureTransport)
+    // 会用系统 CA 存储,其他后端走 curl 内置默认 bundle
+    static bool warned_ca_missing = false;
     std::string ca_path = get_ca_bundle_path();
     if (!ca_path.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path.c_str());
+        FILE* f = fopen(ca_path.c_str(), "rb");
+        if (f) {
+            fclose(f);
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path.c_str());
+        } else if (!warned_ca_missing) {
+            warned_ca_missing = true;
+            std::cerr << "[curl] CA bundle not found at " << ca_path
+                      << ", relying on TLS backend system trust store" << std::endl;
+        }
     }
+    // CURLOPT_SSL_VERIFYPEER 默认 1,信任系统 CA;只有显式关闭才危险
     // 启用 TCP keepalive,避免长连接挂死
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
 
