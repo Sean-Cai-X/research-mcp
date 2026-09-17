@@ -191,7 +191,7 @@ int HttpServer::run() {
         }
 
         sockaddr_in client_addr{};
-        int client_len = sizeof(client_addr);
+        socklen_t client_len = sizeof(client_addr);
         SOCKET client = accept(listen_sock,
                                reinterpret_cast<sockaddr*>(&client_addr), &client_len);
         if (client == INVALID_SOCKET) {

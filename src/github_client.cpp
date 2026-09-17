@@ -29,8 +29,12 @@ static int64_t parse_iso8601(const std::string& date_str) {
             tm.tm_mday = std::atoi(date_str.substr(8, 2).c_str());
             tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
             tm.tm_isdst = 0;
-            // 使用 _mkgmtime (Windows) 将 tm 视为 UTC
+            // 将 tm 视为 UTC 转换为 time_t: Windows 用 _mkgmtime, POSIX 用 timegm
+#ifdef _WIN32
             return (int64_t)_mkgmtime(&tm);
+#else
+            return (int64_t)timegm(&tm);
+#endif
         }
         return 0;
     }
@@ -42,8 +46,12 @@ static int64_t parse_iso8601(const std::string& date_str) {
     tm.tm_min  = std::atoi(date_str.substr(14, 2).c_str());
     tm.tm_sec  = std::atoi(date_str.substr(17, 2).c_str());
     tm.tm_isdst = 0;
-    // _mkgmtime 将 tm 视为 UTC 时间,返回 time_t
+    // 将 tm 视为 UTC 转换为 time_t
+#ifdef _WIN32
     return (int64_t)_mkgmtime(&tm);
+#else
+    return (int64_t)timegm(&tm);
+#endif
 }
 
 // unix timestamp -> ISO8601 字符串 (UTC, "YYYY-MM-DDTHH:MM:SSZ")
@@ -51,7 +59,11 @@ static std::string format_iso8601(int64_t ts) {
     if (ts <= 0) return "1970-01-01T00:00:00Z";
     std::time_t t = (std::time_t)ts;
     std::tm gm{};
+#ifdef _WIN32
     gmtime_s(&gm, &t);
+#else
+    gmtime_r(&t, &gm);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &gm);
     return std::string(buf);

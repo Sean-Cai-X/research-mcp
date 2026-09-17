@@ -37,7 +37,7 @@ public:
         bool stop_on_first_hit = true;
     };
     std::vector<SearchResult> multiSearch(const SearchQuery& query,
-                                           const MultiSearchOptions& options = {});
+                                           MultiSearchOptions options = MultiSearchOptions{});
 
     // Fetch with priority-based fallback
     // 1. Parse canonical_uri scheme to find the owning source

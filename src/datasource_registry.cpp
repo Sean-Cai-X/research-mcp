@@ -64,7 +64,7 @@ std::vector<IDataSource*> DataSourceRegistry::getAvailableSorted() {
 
 std::vector<SearchResult> DataSourceRegistry::multiSearch(
     const SearchQuery& query,
-    const MultiSearchOptions& options) {
+    MultiSearchOptions options) {
 
     std::vector<SearchResult> all_results;
     auto available = getAvailableSorted();
