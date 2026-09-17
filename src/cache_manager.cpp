@@ -2460,7 +2460,11 @@ static std::string now_iso() {
     auto t = static_cast<int64_t>(std::time(nullptr));
     std::time_t tt = static_cast<std::time_t>(t);
     std::tm tm_utc{};
+#ifdef _WIN32
     gmtime_s(&tm_utc, &tt);
+#else
+    gmtime_r(&tt, &tm_utc);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
     return buf;

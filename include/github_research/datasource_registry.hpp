@@ -33,12 +33,11 @@ public:
     // stopOnFirstHit=true: Kiwix (priority 1) hit terminates search
     // maxSources=0: use all available sources
     struct MultiSearchOptions {
-        MultiSearchOptions() = default;
         int max_sources = 0;        // 0 = all available
         bool stop_on_first_hit = true;
     };
     std::vector<SearchResult> multiSearch(const SearchQuery& query,
-                                           MultiSearchOptions options = MultiSearchOptions());
+                                           MultiSearchOptions options);
 
     // Fetch with priority-based fallback
     // 1. Parse canonical_uri scheme to find the owning source
