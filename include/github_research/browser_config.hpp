@@ -1,4 +1,5 @@
-#pragma once
+﻿#pragma once
+#include <cstdint>
 
 // ============================================================================
 // BrowserConfig — CDP / WebView2 双后端统一配置

@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <set>
+#include <cstring>
 
 namespace github_research {
 
