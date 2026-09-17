@@ -1,7 +1,6 @@
 #include "github_research/curl_http_client.hpp"
 
 #include <curl/curl.h>
-#include <windows.h>
 #include <algorithm>
 #include <cctype>
 #include <cstring>
