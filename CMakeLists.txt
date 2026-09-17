@@ -83,16 +83,18 @@ set(CURL_USE_NGTCP2       OFF CACHE BOOL "" FORCE)  # 禁用 HTTP/3
 set(CURL_USE_LIBIDN2      OFF CACHE BOOL "" FORCE)  # 禁用 IDN 国际化域名
 set(CURL_USE_LIBPSL       OFF CACHE BOOL "" FORCE)  # 禁用公共后缀列表
 
-# 加密与认证依赖（Windows 用原生 Schannel 替代）
-set(CURL_USE_OPENSSL      OFF CACHE BOOL "" FORCE)
+# 加密与认证依赖（TLS backend 必须有且只有一个）
+# Windows 用原生 Schannel（无需额外库），Linux/macOS 用 OpenSSL
+set(CURL_USE_SCHANNEL    OFF CACHE BOOL "" FORCE)
+set(CURL_USE_OPENSSL     OFF CACHE BOOL "" FORCE)
+if(WIN32)
+    set(CURL_USE_SCHANNEL ON  CACHE BOOL "" FORCE)
+else()
+    set(CURL_USE_OPENSSL  ON  CACHE BOOL "" FORCE)
+endif()
 set(CURL_USE_GSSAPI       OFF CACHE BOOL "" FORCE)
 set(CURL_USE_KERBEROS     OFF CACHE BOOL "" FORCE)
-set(CURL_USE_AUTH         OFF CACHE BOOL "" FORCE)  # 简化认证
-
-# Windows 下启用系统原生 Schannel 做 TLS，无需额外加密库
-if(WIN32)
-    set(CURL_USE_SCHANNEL    ON  CACHE BOOL "" FORCE)
-endif()
+set(CURL_USE_AUTH         OFF CACHE BOOL "" FORCE)
 
 # 引入本地 curl 源码（全局唯一一处，所有配置必须在这行之前）
 add_subdirectory(third_party/curl-8.20.0)
