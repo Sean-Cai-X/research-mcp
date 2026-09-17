@@ -1,8 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <optional>
 #include <memory>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <nlohmann/json.hpp>
 #include "github_client.hpp"
 #include "github_research/browser_session.hpp"
@@ -35,6 +38,14 @@ public:
 
     // 设置代理(应用到所有 WebView 会话)
     void set_proxy(const std::string& proxy_url);
+
+    // ============ 焦点域自动蔓延 ============
+    // 启动后台线程,定期对所有 active 的 focus 执行 sprawl_tick
+    // interval_seconds: 两次蔓延之间的间隔(默认 300s = 5min)
+    // max_nodes_per_tick: 每次每个 focus 处理的最大节点数(默认 10)
+    void start_auto_sprawl(int interval_seconds = 300, int max_nodes_per_tick = 10);
+    void stop_auto_sprawl();
+    bool auto_sprawl_active() const { return auto_sprawl_running_.load(); }
 
     // ============ GitHub 后端独立 user data dir ============
     // 必须在 run()/run_http() 之前调用(确保首次请求前生效)
@@ -165,6 +176,11 @@ private:
     std::unique_ptr<DataSourceRegistry> datasource_registry_;
     std::unique_ptr<WikiExplorer> wiki_explorer_;
     bool datasource_initialized_ = false;
+
+    // ---------- 自动蔓延后台线程 ----------
+    std::thread auto_sprawl_thread_;
+    std::atomic<bool> auto_sprawl_running_{false};
+    int auto_sprawl_interval_sec_{0};  // 0 = 未启用
 };
 
 } // namespace github_research

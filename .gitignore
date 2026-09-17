@@ -84,3 +84,13 @@ _fix_readme.py
 *_test.txt
 test_integration.ps1
 CDP_CHECKPOINT_*.md
+
+# Ad-hoc build dirs
+build-*/
+*.zip
+
+# SQLite runtime data
+data/
+*.db
+*.db-wal
+*.db-shm

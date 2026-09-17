@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <optional>
@@ -6,9 +6,6 @@
 #include <memory>
 #include <iostream>
 #include <nlohmann/json.hpp>
-#ifdef RESEARCH_MCP_USE_WEBVIEW2
-#include "webview_client.hpp"
-#endif
 #include "curl_http_client.hpp"
 #include "errors.hpp"
 
@@ -19,16 +16,12 @@ using json = nlohmann::json;
 // GitHub REST API 客户端
 // 迁移自 DeerFlow skills/public/github-deep-research/scripts/github_api.py
 // 保留所有方法语义与返回 JSON 字段名不变,仅改语言与 HTTP 后端
-// 混合方案:GitHub API 默认走 libcurl(轻量纯 HTTP),可切换 WebView2(浏览器指纹)
-// 网页源(arXiv/HN/PWC 等)仍统一使用 WebView2
+// GitHub API 走 libcurl(轻量纯 HTTP),网页源走 CDP(Chrome DevTools Protocol)\r
 class GitHubClient {
 public:
     // HTTP 后端选择
     enum class Backend {
         Curl,      // libcurl:纯 HTTP,无浏览器依赖,适用于 GitHub REST API(默认)
-#ifdef RESEARCH_MCP_USE_WEBVIEW2
-        WebView2   // WebView2:浏览器内核,适用于需要 JS 渲染/浏览器指纹的场景
-#endif
     };
 
     explicit GitHubClient(std::optional<std::string> token = std::nullopt,
@@ -247,7 +240,7 @@ public:
     bool is_ready() const { return http_client_->is_ready(); }
 
     // 设置代理(必须在首次请求前调用)
-    // libcurl:CURLOPT_PROXY;WebView2:Chromium --proxy-server
+    // libcurl:CURLOPT_PROXY
     void set_proxy(const std::string& proxy_url) {
         proxy_url_ = proxy_url;
         if (!proxy_url.empty()) {
@@ -255,24 +248,19 @@ public:
         }
     }
 
-    // 设置独立 user data dir(仅 WebView2 后端生效,libcurl 后端为 no-op)
+    // 设置独立 user data dir(libcurl 后端为 no-op,CDP 后端通过 Chrome 命令行参数处理)\r
     // 用于 8 源会话隔离,避免与其他源共用默认路径导致 0x800700aa
     void set_user_data_dir(const std::string& dir) {
         user_data_dir_ = dir;
-#ifdef RESEARCH_MCP_USE_WEBVIEW2
-        if (backend_ == Backend::WebView2) {
-            static_cast<WebViewClient*>(http_client_.get())->set_user_data_dir(dir);
-        }
-#endif
     }
 
-    // 当前使用的后端名称("libcurl" 或 "webview2")
+    // 当前使用的后端名称("libcurl")
     std::string backend_name() const {
         return http_client_->backend_name();
     }
 
     // 首次请求前确保后端已就绪
-    // 返回 false 表示后端不可用(libcurl 链接失败 / WebView2 Edge Runtime 缺失)
+    // 返回 false 表示后端不可用(libcurl 链接失败)
     bool ensure_ready() {
         if (http_client_->is_ready()) return true;
 
@@ -307,7 +295,7 @@ private:
 
     std::unique_ptr<IHttpClient> http_client_;
     Backend backend_ = Backend::Curl;
-    std::string user_data_dir_;  // 仅 WebView2 后端使用
+    std::string user_data_dir_;
     int timeout_seconds_ = 30;
     std::string proxy_url_;
     std::map<std::string, std::string> headers_;

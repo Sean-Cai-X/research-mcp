@@ -249,6 +249,37 @@ json ToolArxivSearchPapers(const json& args) {
         + "&sortBy=relevance&sortOrder=descending";
 
     json entries = fetch_arxiv_api(url);
+
+    // ── 宽松 fallback ──
+    // 现象:罕见技术术语直接搜可能返回 0(arxiv API 无模糊匹配)
+    // 策略:第一次空 → 拆词做 OR 组合再试一次
+    if (entries.empty()) {
+        std::cerr << "[arxiv] primary query returned empty, trying OR fallback" << std::endl;
+        std::string fallback_query;
+        std::string word;
+        for (char c : query) {
+            if (c == ' ') {
+                if (!word.empty()) {
+                    if (!fallback_query.empty()) fallback_query += " OR ";
+                    fallback_query += "ti:" + word;
+                    word.clear();
+                }
+            } else word += c;
+        }
+        if (!word.empty()) {
+            if (!fallback_query.empty()) fallback_query += " OR ";
+            fallback_query += "ti:" + word;
+        }
+        if (!fallback_query.empty() && fallback_query != query) {
+            std::string fallback_url = std::string("http://export.arxiv.org/api/query?search_query=")
+                + UrlEncodeComponent(fallback_query)
+                + "&start=0&max_results=" + std::to_string(maxResults)
+                + "&sortBy=relevance&sortOrder=descending";
+            entries = fetch_arxiv_api(fallback_url);
+            std::cerr << "[arxiv] OR fallback returned " << entries.size() << " entries" << std::endl;
+        }
+    }
+
     if (entries.empty()) {
         return McpError(std::string("ERROR: ") + kLogPrefix + " Atom API returned no results for query='" + query + "'");
     }

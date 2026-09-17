@@ -90,13 +90,7 @@ static int cache_ttl_for_endpoint(const std::string& endpoint) {
 
 GitHubClient::GitHubClient(std::optional<std::string> token, int timeout_seconds, Backend backend)
     : timeout_seconds_(timeout_seconds), backend_(backend) {
-    if (backend_ == Backend::Curl) {
-        http_client_ = std::make_unique<CurlHttpClient>("Deep-Research-Bot/1.0", timeout_seconds);
-#ifdef RESEARCH_MCP_USE_WEBVIEW2
-    } else {
-        http_client_ = std::make_unique<WebViewClient>("Deep-Research-Bot/1.0", timeout_seconds, true);
-#endif
-    }
+    http_client_ = std::make_unique<CurlHttpClient>("Deep-Research-Bot/1.0", timeout_seconds);
     headers_["Accept"] = "application/vnd.github.v3+json";
     headers_["User-Agent"] = "Deep-Research-Bot/1.0";
     if (token && !token->empty()) {
@@ -153,7 +147,7 @@ json GitHubClient::http_get(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    // 后端网络层(libcurl 或 WebView2)
+    // 后端网络层(libcurl)
     HttpResponse resp = http_client_->get(url, hdrs);
     status_code = resp.status_code;
     body = resp.body;
@@ -254,7 +248,7 @@ std::string GitHubClient::http_get_text(const std::string& endpoint,
     std::string body;
     std::map<std::string, std::string> resp_headers;
 
-    // 后端网络层(libcurl 或 WebView2)
+    // 后端网络层(libcurl)
     HttpResponse resp = http_client_->get(url, hdrs);
     status_code = resp.status_code;
     body = resp.body;

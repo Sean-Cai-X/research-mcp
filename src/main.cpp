@@ -1,4 +1,4 @@
-#include "github_research/mcp_server.hpp"
+﻿#include "github_research/mcp_server.hpp"
 #include "github_research/cache_manager.hpp"
 #include <cstdlib>
 #include <iostream>
@@ -29,6 +29,7 @@ static void print_help() {
               << "  --s2-profile <DIR>         Enable Semantic Scholar WebView session\n"
               << "  --so-profile <DIR>         Enable Stack Overflow WebView session\n"
               << "  --kiwix-url <URL>          Kiwix local server URL (e.g. http://127.0.0.1:8080)\n"
+              << "  --auto-sprawl [SECONDS]    启用焦点域自动蔓延后台线程(默认 300s 间隔)\n"
               << "  --help                     Show this help\n\n"
               << "HTTP endpoints:\n"
               << "  POST /mcp        JSON-RPC 2.0\n"
@@ -92,6 +93,7 @@ int main(int argc, char* argv[]) {
     ProfileArgs profiles;
     bool cache_smoke_test = false;
     std::string kiwix_url;
+    int auto_sprawl_interval = 0;  // 0 = 不启用
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -131,6 +133,15 @@ int main(int argc, char* argv[]) {
             token = std::string(argv[++i]);
         } else if (arg == "--kiwix-url" && i + 1 < argc) {
             kiwix_url = argv[++i];
+        } else if (arg == "--auto-sprawl") {
+            // 可选: --auto-sprawl 300 或 --auto-sprawl(默认)
+            if (i + 1 < argc) {
+                auto_sprawl_interval = std::atoi(argv[i + 1]);
+                if (auto_sprawl_interval > 0) ++i;
+                else auto_sprawl_interval = 300;
+            } else {
+                auto_sprawl_interval = 300;
+            }
         } else {
             std::cerr << "Unknown argument: " << arg << "\n\n";
             print_help();
@@ -169,7 +180,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "[cache] ready: " << st.dump() << std::endl;
     }
 
-    // ── Cache Smoke Test (不依赖 WebView2) ──
+    // ── Cache Smoke Test ──
     if (cache_smoke_test) {
         using namespace github_research;
         CacheManager& cm = CacheManager::instance();
@@ -622,8 +633,7 @@ int main(int argc, char* argv[]) {
         // 41. module_timeline_analysis layer=1 (轻量索引)
         // 通过 GitHubClient 调用,但 smoke test 不依赖网络,
         // ingest_first=false 时只用本地数据
-        // 这里直接测试 cache_manager 的查询能力已覆盖,
-        // 不再实例化 GitHubClient(需要 WebView2)
+        // 这里直接测试 cache_manager 的查询能力已覆盖,\s*// 不再实例化 GitHubClient
 
         // 42. file_cooccurrence 双向查询 (查 b.cpp 也应该找到 a.cpp)
         auto rf2 = cm.query_related_files(repo_full, "src/b.cpp", 1, 10);
@@ -1086,6 +1096,25 @@ int main(int argc, char* argv[]) {
     if (!proxy_url.empty()) {
         std::cerr << "[mcp] proxy: " << proxy_url << std::endl;
         server.set_proxy(proxy_url);
+
+        // ── 关键修补:把 --proxy 写回进程环境变量 ──
+        // CurlHttpClient 构造函数只读环境变量(HTTPS_PROXY > HTTP_PROXY > ALL_PROXY),
+        // 各模块(arxiv / hn algolia / hf / pwc / s2 / wiki)独立创建的 curl 实例
+        // 不会经过 McpServer::set_proxy(),导致 --proxy 命令行参数对它们无效。
+        // 这里写回环境变量,所有后续 curl 实例自动继承,一劳永逸。
+        auto export_env = [&](const std::string& name, const std::string& val) {
+#ifdef _WIN32
+            _putenv_s(name.c_str(), val.c_str());
+#else
+            setenv(name.c_str(), val.c_str(), 1);
+#endif
+        };
+        export_env("HTTPS_PROXY", proxy_url);
+        export_env("https_proxy", proxy_url);
+        export_env("HTTP_PROXY",  proxy_url);
+        export_env("http_proxy",  proxy_url);
+        std::cerr << "[mcp] proxy exported to env: HTTPS_PROXY/HTTP_PROXY="
+                  << proxy_url << std::endl;
     } else {
         std::cerr << "[mcp] proxy: none (direct)" << std::endl;
     }
@@ -1096,8 +1125,7 @@ int main(int argc, char* argv[]) {
         server.init_github_profile(profiles.gh);
     }
 
-    // 各源 profile 路径交给 McpServer,首次 tool 调用时懒加载 WebView2 会话
-    // 这样 initialize/tools/list 能立即响应,不被 7 个 WebView2 初始化阻塞
+    // 各源 profile 路径交给 McpServer,首次 tool 调用时懒加载 CDP 会话\s*// initialize/tools/list 立即响应
     github_research::McpServer::ProfilePaths ppaths;
     ppaths.arxiv = profiles.arxiv;
     ppaths.hn    = profiles.hn;
@@ -1114,8 +1142,13 @@ int main(int argc, char* argv[]) {
         std::cerr << "[mcp] kiwix: " << kiwix_url << std::endl;
     }
 
-    std::cerr << "[mcp] WebView2 sessions will be lazy-initialized on first tool call"
+    std::cerr << "[mcp] CDP sessions will be lazy-initialized on first tool call"
               << std::endl;
+
+    // ── 焦点域自动蔓延 ──
+    if (auto_sprawl_interval > 0) {
+        server.start_auto_sprawl(auto_sprawl_interval, 10);
+    }
 
     if (port > 0) return server.run_http(port);
     return server.run();

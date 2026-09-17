@@ -489,6 +489,21 @@ CREATE TABLE IF NOT EXISTS focus_members (
     exec_sql("CREATE INDEX IF NOT EXISTS idx_fm_status   ON focus_members(focus_id, sprawl_status);");
     exec_sql("CREATE INDEX IF NOT EXISTS idx_fm_relevance ON focus_members(focus_id, relevance DESC);");
 
+    // 表 15b: focus_tick_history (每轮态势快照摘要 — 用于多轮对比和消息提醒)
+    exec_sql(R"(
+CREATE TABLE IF NOT EXISTS focus_tick_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    focus_id        TEXT NOT NULL REFERENCES focuses(id),
+    tick_index      INTEGER NOT NULL,
+    ticked_at       INTEGER NOT NULL,          -- unix seconds
+    snapshot_stats  TEXT NOT NULL,              -- JSON: {total_nodes, seed/active/boundary/exhausted/pruned, total_relations, depth_dist}
+    diff_stats      TEXT NOT NULL,              -- JSON: {added_count, removed_count, status_changed, added_rels, removed_rels}
+    growth_report   TEXT,                       -- JSON: {direction_distribution, key_paths, efficiency}
+    notices         TEXT                        -- JSON array of notice objects (第2/3阶段填充)
+);
+    )");
+    exec_sql("CREATE INDEX IF NOT EXISTS idx_fth_focus_time ON focus_tick_history(focus_id, ticked_at DESC);");
+
     // 表 16: attributes (属性级增量存储 — 蔓延核心)
     exec_sql(R"(
 CREATE TABLE IF NOT EXISTS attributes (
@@ -3074,6 +3089,78 @@ json CacheManager::get_sprawl_stats(const std::string& focus_id) {
     stats["active_focuses"] = n_focuses;
 
     return stats;
+}
+
+// ============================================================================
+// tick history — 态势感知第 2/3 阶段
+// ============================================================================
+int CacheManager::append_focus_tick_history(const std::string& focus_id,
+                                             const json& snapshot_stats,
+                                             const json& diff_stats,
+                                             const json& growth_report,
+                                             const json& notices) {
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // 算下一个 tick_index
+    std::string sql_max = "SELECT COALESCE(MAX(tick_index), -1) FROM focus_tick_history WHERE focus_id=?";
+    sqlite3_stmt* st = nullptr;
+    int next_idx = 0;
+    if (sqlite3_prepare_v2(db_, sql_max.c_str(), -1, &st, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) next_idx = sqlite3_column_int(st, 0) + 1;
+        sqlite3_finalize(st);
+    }
+
+    std::string sql = "INSERT INTO focus_tick_history "
+                      "(focus_id, tick_index, ticked_at, snapshot_stats, diff_stats, growth_report, notices) "
+                      "VALUES (?,?,?,?,?,?,?)";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) return -1;
+    int64_t ts = now_sec();
+    auto bind_json = [&](int pos, const json& j) {
+        std::string s = j.is_null() ? "null" : j.dump();
+        sqlite3_bind_text(stmt, pos, s.c_str(), (int)s.size(), SQLITE_TRANSIENT);
+    };
+    sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, next_idx);
+    sqlite3_bind_int64(stmt, 3, ts);
+    bind_json(4, snapshot_stats);
+    bind_json(5, diff_stats);
+    bind_json(6, growth_report);
+    bind_json(7, notices.is_null() ? json::array() : notices);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return next_idx;
+}
+
+std::vector<json> CacheManager::get_focus_tick_history(const std::string& focus_id,
+                                                        int limit) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<json> result;
+    std::string sql = "SELECT tick_index, ticked_at, snapshot_stats, diff_stats, growth_report, notices "
+                      "FROM focus_tick_history WHERE focus_id=? ORDER BY tick_index DESC LIMIT "
+                      + std::to_string(std::max(1, limit));
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return result;
+    sqlite3_bind_text(stmt, 1, focus_id.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        json row;
+        row["tick_index"] = sqlite3_column_int(stmt, 0);
+        row["ticked_at"]  = sqlite3_column_int64(stmt, 1);
+        auto col_text = [&](int i) -> json {
+            const char* s = (const char*)sqlite3_column_text(stmt, i);
+            if (!s) return json::object();
+            try { return json::parse(s); } catch (...) { return json::object(); }
+        };
+        row["snapshot_stats"] = col_text(2);
+        row["diff_stats"]     = col_text(3);
+        row["growth_report"]  = col_text(4);
+        row["notices"]        = col_text(5);
+        result.push_back(row);
+    }
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 } // namespace github_research

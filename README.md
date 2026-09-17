@@ -1,26 +1,60 @@
-﻿# github-research-mcp (DeerFlow++)
+﻿# research-mcp (DeerFlow++)
 
-9 源统一研究 MCP 服务,**全链路纯 HTTP REST**(libcurl 完成所有核心工具调用)+ **可选浏览器后端**(CDP / WebView2 仅用于 Wiki Explorer / Research Deep Dive 网页兜底)+ **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系(L1 项目概览 / L2 单点深挖 / L3 关联图谱)** + **模块演进时序分析原语(子模块切片 / 维护链路归因)**。
+**9 源统一研究 MCP 服务** + **四层态势感知 (Situation Engine)** + **事件研判 (Judgement Layer)** + **CDP 固定浏览器后端** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系 (L1/L2/L3)** + **模块演进时序分析原语**。
+
+> **固定 CDP 后端**:WebView2 已物理删除,所有浏览器相关工具统一通过 Chrome DevTools Protocol 实现(跨平台、零 GUI、纯 headless)。不再需要 `-DRESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2|CDP` 开关。
 
 ## 特性
 
-- **9 源 62 个工具**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow + **10 个定向知识雷达 Focus 工具**
-- **全链路纯 HTTP REST**:所有源的核心工具均通过 libcurl + 官方 API / HTML 页面实现,**零浏览器依赖,启动即用,无进程残留**
-- **可选浏览器后端**(仅补充场景):CMake 开关 `RESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2`(Windows 专属) 或 `CDP`(跨平台)。启用后可获得 **Wiki Explorer 通用网页爬取** + **HN 深度文章兜底抓取**能力
-- **CDP 后端原理**:启动独立 Chrome `--remote-debugging-port`,原生 Winsock2/POSIX socket 手写 WebSocket 帧(opcode=1 TEXT),CDP JSON 直接双向通信;自动处理分片帧拼接、ping/pong、代理隔离
-- **后端可切换**:`GitHubClient` 通过 `std::unique_ptr<IHttpClient>` 多态持有 backend,构造时可选 `Backend::Curl`(默认) 或 `Backend::WebView2`
-- **统一原始文本提取**:网页源统一返回 `{success, url, title, text, html}`,DOM 解析交给 AI
-- **串行执行**:所有工具调用串行阻塞,无并行 / 线程池 / detach,简单可调试
-- **MCP over stdio + HTTP**:JSON-RPC 2.0,兼容 Claude Desktop / llama.app / TRAE / Cursor
-- **统一 SQLite 缓存层(WAL + 20 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + **定向知识雷达 6 张表**(focuses / focus_members / attributes / gaps / extraction_jobs / track_schedules)
+### 核心检索(60+ 工具)
+- **9 源统一**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
+- **全链路纯 HTTP REST**:所有核心工具通过 libcurl + 官方 API 实现,**零浏览器依赖,启动即用**
+- **CDP 固定浏览器后端**:原生 Winsock2/POSIX socket 手写 WebSocket 帧,Chrome `--remote-debugging-port` headless,自动处理分片帧/ping/pong/代理隔离/ws 断线自动重连
+- **代理统一传递**:`--proxy` 命令行参数自动写入进程环境变量,所有 curl 实例(含浏览器 CDP Chrome)统一继承
+- **引用溯源**:每个工具返回自动注入 `_source` 元数据,含 `tool / source_id / fetched_at / source_url / cache_hit`
+
+### 四层态势感知 (Situation Engine) 🧭
+完整嵌入 `focus_sprawl_tick` 每轮执行周期,形成**「基准快照 → 蔓延执行 → 差分计算 → 态势解析 → 事件研判 → 分级通知输出」**闭环:
+
+| 层 | 能力 | 输出 |
+|---|---|---|
+| **基准快照** | 蔓延前后各做一次全量快照 | baseline + current 两份 JSON(节点/关系/统计) |
+| **差分计算** | 逐维度对比,标注来源锚点 | diff_result(新增/修剪/状态变更/新增/解除关系) |
+| **态势解析** | 增量生长报告 + 主干道 Top3 三维加权 | 方向分布/生长效率/关键路径 + 主干道路径 |
+| **事件研判** | 通用四维度 + 分类型专项 | 领域定位/事件性质/影响半径/趋势信号 + 参考判断 |
+
+### 三层分级通知 + Flash 异动
+| Level | 规则 | 数量 |
+|---|---|---|
+| **flash** | 跨领域通路 / 枢纽节点接入 / 生长方向突变 / 竞争格局 | 4 类 |
+| **important** | 持续停滞 / 大规模修剪 / 核心节点变动 | 3 类 |
+| **normal** | 路径耗尽 / 生长停滞 / 节点修剪 / 关系解除 | 4 类 |
+
+### 研判层:四维度自动解读
+- **领域定位**:核心节点 / 主干道节点 / 分支节点 / 边缘跨界节点(度数 + 主干道匹配)
+- **事件性质**:技术突破 / 瓶颈信号 / 路线分叉 / 格局变动 / 常规迭代(11 类预定义)
+- **影响半径**:全局 / 主干道 / 分支 / 局部(关联节点数 + 是否连通主干道)
+- **趋势信号**:持续信号 / 趋势拐点 / 孤立事件(历史 5 轮同类型事件密度)
+- **分级输出**:flash/important 自动给四维度完整研判 + 参考判断;normal 给标准研判 + 节点卡片
+
+### 定向知识雷达 (Focus) + 自动蔓延
+- 10 个 `focus_*` 工具:种子实体 → 加权优先级蔓延 → 相关性剪枝 → 状态机控制
+- 蔓延状态机:`seed / active / boundary / pruned / exhausted`
+- `--auto-sprawl [SECONDS]`:后台线程定期自动蔓延(默认 300s),无需人工触发
+- `focus_tick_history` 表:每轮快照摘要落库,支持跨轮回溯
+
+### 缓存/融合/熔断
+- **统一 SQLite 缓存层(WAL + 21 张表)**:cache_entries / cache_blobs / entities / relations / metrics / sources / source_fusion / fallback_policies + 定向知识雷达 7 张表 + **focus_tick_history (态势历史)**
 - **多源融合 + 字段级策略**:UNION / LATEST,自动按 source reliability 排序
-- **熔断器 + 降级链**:主源失败自动切换备用源,所有源失败返回陈旧缓存(stale)
-- **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、记录时间快照
-- **三层观测体系**:L1 项目概览(13 个 github_* 工具) / L2 单点深挖(局部对象连续动态分析索引) / L3 关联图谱(跨源 entity + relations)
-- **模块演进时序分析原语**:`github_subdir_timeline_slice`(子模块拆分时序切片) + `github_maintenance_attribution`(维护链路归因),还原 Linux 内核等大仓库的维护流水线
-- **跨源闭合**:HN story 自动检测 `source_url` 中的 arxiv.org,建立 `story -[mentions]-> paper` 跨源关系
-- **定向知识雷达 (Focus)** 🌐:给一个种子实体,自动发现相关性邻居、计算加权分数、按相关性剪枝、以状态机控制蔓延节奏,实现"你给个方向,它自己找到相关的东西并持续跟踪"
-- **Web Search 三级降级 + 熔断器**: Bing(熔断冷却 5min) → Tavily(熔断冷却) → DuckDuckGo HTML(无 key 永远兜底) → 冻结缓存(7 天 stale)
+- **熔断器 + 降级链**:主源失败 → 备用源 → 陈旧缓存(stale)
+- **Entity Mapper + 关系图谱**:自动注册实体、建立跨源关系、HN story 自动 mentions arxiv paper
+
+### 架构/工程
+- **串行执行**:所有工具调用串行阻塞,简单可调试
+- **MCP over HTTP + stdio**:JSON-RPC 2.0,兼容 Claude Desktop / TRAE / Cursor
+- **三层观测体系**:L1 项目概览 / L2 单点深挖 / L3 关联图谱
+- **模块演进时序分析原语**:`github_subdir_timeline_slice` + `github_maintenance_attribution`
+- **跨源闭合**:HN story 自动检测 arxiv.org → 建立跨源关系
 
 ## 认知模型演进：从「知识超级合成器」到「主动知识探险家」
 
@@ -107,7 +141,7 @@ From Serial → Parallel Inference
 
 ## 架构
 
-### 全链路纯 HTTP REST + 三层观测体系
+### 全链路纯 HTTP REST + 四层态势感知 + 三层观测体系
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -120,12 +154,9 @@ From Serial → Parallel Inference
 │  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (5) /          │
 │  pwc_*   (6) / hf_*   (9) / s2_*    (7) / so_*    (6)          │
 │  + github_module_timeline_analysis (L2/L3)                      │
-│  + github_subdir_timeline_slice    (原语A:子模块切片)            │
-│  + github_maintenance_attribution  (原语B:维护链路归因)          │
-│  + github_fetch_repo_detail / github_fetch_relation_network     │
-│  + github_search_index / github_ingest_*                        │
-│  + focus_* (19) / entity_* (1) / web_search    (定向知识雷达)  │
-└────────────────┬───────────────────────────────────────────────────────┘
+│  + focus_* (10) / entity_* (1) / wiki_* (3) / web_search      │
+│  + situation_* (2): focus_snapshot / focus_situation_report    │
+└────────────────┬───────────────────────────────────────────────┘
                  │
    ┌─────────────┼─────────────┬─────────────┬─────────────┐
    ▼             ▼             ▼             ▼             ▼
@@ -135,32 +166,39 @@ From Serial → Parallel Inference
 │libcurl│ │+API  │ │Firebase│ │+API  │ │+API  │ │纯HTTP│
 │  +   │ │+HTML │ │+Algolia│ │+HTML │ │+HTML │ │+API  │
 │Cache │ │Cache │ │+curl  │ │Cache │ │Cache │ │Cache │
-│      │ │Entity │ │+Cache │ │Entity │ │Entity │ │Entity│
+│_src  │ │Entity │ │+Cache │ │Entity │ │Entity │ │Entity│ ← 统一 _source 溯源注入
 └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘
    │        │        │        │        │        │
    └────────┴────────┴────────┴────────┴────────┘
                          │
-        ┌────────────────┴────────────────┐
-        ▼                                 ▼
-┌──────────────────┐         ┌──────────────────────────┐
-│ libcurl 8.20     │         │  SQLite 统一缓存层         │
-│ 所有源核心调用     │         │  - cache_entries/blobs    │
-│ (GitHub API,     │         │  - entities / relations   │
-│  arXiv API, HN   │         │  - metrics (时间序列)      │
-│  Firebase/Algolia│         │  + source_fusion           │
-│  npm/pypi API...)│         │  + circuit breaker         │
-│                  │         │  + fallback chain          │
-└────────┬─────────┘         └──────────────────────────┘
-         │                                  │
-         │  (可选, CMake 开关启用)          │
-         ▼                                  ▼
-┌──────────────────┐         ┌──────────────────────────┐
-│ 浏览器后端        │         │  三层观测体系              │
-│ CDP / WebView2   │         │  L1: 项目概览 (github_*)  │
-│ 仅补充场景:       │         │  L2: 单点深挖 (timeline)   │
-│ - Wiki Explorer  │         │  L3: 关联图谱 (跨源)       │
-│ - HN 外部文章兜底 │         └──────────────────────────┘
-└──────────────────┘
+        ┌────────────────┼────────────────┐
+        ▼                ▼                 ▼
+┌───────────────┐ ┌───────────────┐ ┌────────────────────────────────────┐
+│ libcurl 8.20  │ │  SQLite 缓存  │ │ Chrome DevTools Protocol (固定)   │
+│ 所有源核心调用 │ │ WAL + 21 表    │ │ headless Chrome --remote-debugging│
+│ (静态 Schannel)│ │ + 态势历史表  │ │ 原生 socket + 手写 WS 帧          │
+└──────┬────────┘ └──────┬────────┘ │ 自动重连 / 分片 / ping-pong     │
+       │                 │          └────────────────────────────────────┘
+       │                 │                          │
+       │                 │         ┌─────────────────┴──────────────┐
+       │                 │         ▼                                ▼
+       │                 │   ┌────────────┐              ┌──────────────────────┐
+       │                 │   │ Situation  │              │  自动蔓延后台线程     │
+       │                 │   │ Engine     │              │  --auto-sprawl 300    │
+       │                 │   │ 四层链路   │              │  定期 tick 自动触发    │
+       │                 │   │ + 研判层   │              └──────────────────────┘
+       │                 │   │ + 通知引擎 │
+       │                 │   └──────┬─────┘
+       │                 │          │ focus_tick_history 每轮落库
+       └─────────────────┴──────────┘
+                         │
+                         ▼
+                  ┌──────────────────┐
+                  │ 三层观测体系       │
+                  │  L1 项目概览       │
+                  │  L2 单点深挖       │
+                  │  L3 关联图谱       │
+                  └──────────────────┘
 ```
 
 > **HN 纯 HTTP 架构**:全部 7 个 `hn_*` 工具均通过 libcurl 实现,无需浏览器依赖:
@@ -203,9 +241,9 @@ MCP Client  →  JSON-RPC  →  dispatch_<source>_tool(args)
 |---|---|---|
 | 9 源核心工具(62 个) | ❌ 不需要 | 全部 libcurl + API |
 | Wiki Explorer (`wiki_discover` / `wiki_read` / `wiki_scan`) | ❌ 不需要 | Kiwix 本地 HTTP server |
-| 通用网页爬取(`web_crawler` priority 4) | ✅ 需要 | CDP/WebView2 Navigate + ExecuteScript |
-| Web Search 深度爬取(priority 7) | ✅ 需要 | CDP/WebView2 Navigate + ExecuteScript |
-| HN 外部文章兜底(极罕见) | ✅ 需要 | CDP/WebView2 Navigate |
+| 通用网页爬取(`web_crawler` priority 4) | ✅ 需要 | CDP Navigate + ExecuteScript |
+| Web Search 深度爬取(priority 7) | ✅ 需要 | CDP Navigate + ExecuteScript |
+| HN 外部文章兜底(极罕见) | ✅ 需要 | CDP Navigate |
 
 如需启用浏览器后端,通过 CMake 开关选择:
 
@@ -217,7 +255,7 @@ cmake -DRESEARCH_MCP_BROWSER_BACKEND=CDP ..
 cmake -DRESEARCH_MCP_BROWSER_BACKEND=WEBVIEW2 ..
 ```
 
-## 统一 SQLite 缓存层(WAL + 20 张表)
+## 统一 SQLite 缓存层(WAL + 21 张表)
 
 ### 表结构
 
@@ -408,10 +446,10 @@ Wiki Explorer 作为第 9 号源,引入 **Kiwix 本地离线维基镜像** 作�
 | 1 | `kiwix_local` | Kiwix 本地离线维基服务器(最高优先级) | HTTP REST (Kiwix serve) |
 | 2 | `git_raw` | Git 仓库 raw 文件直链 | libcurl HTTP |
 | 3 | `github_wiki` | GitHub Wiki 页面 | libcurl HTTP(通用抓取) / 浏览器后端补充 |
-| 4 | `web_crawler` | 通用网页爬虫(任意 URL) | 浏览器后端 CDP/WebView2 |
+| 4 | `web_crawler` | 通用网页爬虫(任意 URL) | 浏览器后端 CDP |
 | 5 | `github_api` | GitHub REST API(主源) | libcurl |
 | 6 | `arxiv` | arXiv 论文库 | **纯 HTTP**(arXiv API + HTML) |
-| 7 | `web_search` | Web 搜索引擎(SERP) | 浏览器后端 CDP/WebView2 |
+| 7 | `web_search` | Web 搜索引擎(SERP) | 浏览器后端 CDP |
 | 8 | `local_fs` | 本地文件系统扫描 | 原生 C++ 文件 IO |
 | 9 | `git_clone` | Git clone 完整仓库 | libgit2 / shell 调用 |
 
@@ -722,6 +760,201 @@ $r.result.content[0].text
 2. **窄操作提取** — 一次一个属性,强制 JSON,失败重试,让小模型也能可靠贡献(已有 60+ 个检索工具直接当"发现邻居的手"来用)
 3. **缺口驱动的定向调度** — `gaps` 表 + 状态机 + 自适应间隔,让抓取有方向地蔓延,而不是盲目重复
 
+## 四层态势感知 (Situation Engine) 🧭
+
+完整嵌入 `focus_sprawl_tick` 每轮执行周期,从「会报路况的地图」升级为「懂局势的参谋」。
+
+### 完整执行链路
+
+```
+基准快照 → 蔓延执行 → 差分计算 → 态势解析 → 事件研判 → 分级通知输出
+              │              │              │            │            │
+              ▼              ▼              ▼            ▼            ▼
+         baseline         diff          main_roads   四维度       notices
+         current          stats         Top3 加权     研判+参考    (带研判)
+                                                       判断
+              │              │              │            │            │
+              └──────────────┴──────────────┴────────────┴────────────┘
+                                       │
+                                       ▼
+                               append_focus_tick_history
+                               (整轮落库,支持回溯)
+```
+
+### 第一层:基准快照
+
+蔓延前后各做一次全量快照,作为对比基准:
+
+```json
+{
+  "timestamp": 1758000000,
+  "nodes": [...],       // 所有节点
+  "relations": [...],   // 所有关系
+  "stats": {
+    "total_nodes": 15,
+    "seed": 2, "active": 8, "boundary": 4, "pruned": 1, "exhausted": 0,
+    "total_relations": 18,
+    "depth_distribution": {"0":2, "1":8, "2":4, "3":1}
+  }
+}
+```
+
+### 第二层:差分计算
+
+逐维度对比,所有变更标注来源锚点:
+
+```json
+{
+  "added_nodes":    [{entity_id, canonical_name, type, relevance, parent_candidates...}],
+  "removed_nodes":  [{entity_id, canonical_name, prune_reason, pruned_from_path...}],
+  "status_changed": [{entity_id, old_status, new_status, reason}],
+  "added_relations":   [{source_id, target_id, relation_type, weight}],
+  "removed_relations": [{source_id, target_id, relation_type}],
+  "stats": {
+    "added_count": 5, "removed_count": 2,
+    "status_changed": 3, "added_rels": 7, "removed_rels": 1
+  }
+}
+```
+
+### 第三层:态势解析
+
+#### 增量生长报告
+
+```json
+{
+  "growth_report": {
+    "new_boundary": 3,
+    "new_active": 2,
+    "growth_efficiency": 0.71,
+    "direction_distribution": {"paper": 4, "repo": 1},
+    "key_paths": [
+      {"start": "seed:transformer", "via": ["paper:xxx", "repo:yyy"], "end": "paper:zzz"}
+    ]
+  }
+}
+```
+
+#### 主干道 Top3 (三维加权)
+
+| 维度 | 权重 | 算法 |
+|---|---|---|
+| 节点度数 | 0.4 | 路径上所有节点的关系边数之和 |
+| 关系类型 | 0.3 | Σ `rel_weight` (cites=1.0 / depends_on=0.9 / extends=0.7 / competes_with=0.5 / 其余=0.3) |
+| 种子距离 | 0.3 | Σ `(max_depth - node.depth) / max_depth` — 离种子越近贡献越大 |
+
+```json
+{
+  "main_roads": [
+    {
+      "rank": 1,
+      "path": ["seed:transformer", "paper:attention-is-all-you-need", "repo:hf/transformers"],
+      "total_weight": 8.72,
+      "weight_breakdown": {"degree": 3.8, "relation_type": 2.9, "seed_distance": 2.02},
+      "domains": ["paper", "repo"]
+    }
+  ]
+}
+```
+
+### 第四层:事件研判 + 分级通知
+
+#### 通用四维度研判
+
+| 维度 | 计算依据 | 分类 |
+|---|---|---|
+| **领域定位** | 度数 + 主干道匹配 | 核心节点(度数≥5 + 在主干道上) / 主干道节点 / 分支节点 / 边缘节点 |
+| **事件性质** | `notice.type` 预定义映射表(11 类) | 技术突破 / 瓶颈信号 / 路线分叉 / 格局变动 / 常规迭代 |
+| **影响半径** | 直接邻居数 + 是否连通主干道 | 全局 / 主干道 / 分支 / 局部 |
+| **趋势信号** | 历史 5 轮同类型事件密度 | 持续信号(≥2次) / 趋势拐点(1次) / 孤立事件 / 首次出现 |
+
+#### 分级通知 (11 类)
+
+| Level | 规则 | 数量 | 自动研判 |
+|---|---|---|---|
+| **flash** | 跨领域通路 / 枢纽节点接入 / 生长方向突变 / 竞争格局 | 4 | 四维度完整研判 + 参考判断 |
+| **important** | 持续停滞 / 大规模修剪 / 核心节点变动 | 3 | 四维度完整研判 |
+| **normal** | 路径耗尽 / 生长停滞 / 节点修剪 / 关系解除 | 4 | 标准研判 + 节点卡片 |
+
+#### 输出示例 (真实 HTTP 测试)
+
+```
+=== TICK 1 ===                              ← 首轮,只有 normal
+  [normal] growth_stalled
+    summary -> nature=瓶颈信号(本轮无新增), impact=局部影响
+
+=== TICK 2 ===                              ← 连续 2 轮,important 升级!
+  [important] continuous_stall
+    judgement -> pos=领域级事件, nature=瓶颈信号(连续 2 轮无新增),
+                 impact=全局影响, trend=孤立事件(历史中未出现过同类型事件)
+
+=== TICK 3 ===                              ← 趋势信号跨轮次精确更新!
+  [important] continuous_stall
+    judgement -> ... trend=趋势拐点(历史中出现过 1 次,本轮再次触发)
+```
+
+#### 趋势信号跨轮次进化
+
+```
+tick 0 (首轮):   trend=首次出现(无历史对比)          ← 预期
+tick 1:          trend=孤立事件(历史中未出现过)       ← 正确
+tick 2:          trend=趋势拐点(历史中出现过 1 次)    ← ⬆️ 跨轮次精确追踪
+tick 3+:         trend=持续信号(历史中连续出现 ≥2 次)
+```
+
+### 工具接口
+
+| 工具名 | 描述 |
+|---|---|
+| `focus_snapshot` | 第一层快照:直接返回当前焦点域节点+关系+统计 |
+| `focus_situation_report` | **四层一站式**:baseline → sprawl_tick → current → diff + parse + **自动写 tick 历史** |
+
+### 后台自动蔓延
+
+启动时加 `--auto-sprawl [SECONDS]`,后台线程定期自动触发 `focus_sprawl_tick`:
+
+```powershell
+# 默认 300s 每 tick
+.\research-mcp.exe --port 8765 --auto-sprawl
+
+# 自定义间隔 10 分钟
+.\research-mcp.exe --port 8765 --auto-sprawl 600
+```
+
+### Tick 历史表 (focus_tick_history)
+
+每轮快照摘要自动落库,支持跨轮回溯:
+
+| 列 | 说明 |
+|---|---|
+| `focus_id` | 关联焦点域 |
+| `tick_index` | 自增序号,每轮 +1 |
+| `ticked_at` | unix seconds |
+| `snapshot_stats` | JSON:当前轮节点/关系统计 |
+| `diff_stats` | JSON:本轮差分统计 |
+| `growth_report` | JSON:方向分布/效率/关键路径 |
+| `notices` | JSON array:本轮所有通知(含研判) |
+
+### 引用溯源 (_source)
+
+所有工具返回自动注入溯源元数据:
+
+```json
+{
+  "_source": {
+    "tool": "arxiv_search_papers",
+    "source_id": "arxiv:2401.01330",
+    "fetched_at": "2026-09-17T06:30:00Z",
+    "data_source": "arxiv.org",
+    "source_url": "https://arxiv.org/api/query...",
+    "endpoint": "/api/query",
+    "cache_hit": false
+  }
+}
+```
+
+AI 可直接在结论中标注 `[source_id]` 引用,科研严谨性自动对齐。
+
 ## 二进制程序下载(无需自行编译)
 
 打 tag 推送后,GitHub Actions 云端自动编译并发布到 Release。直接下载即用,静态链接 MSVC CRT,纯净 Windows 10/11 x64 机器无需另装 VC++ 运行库。
@@ -755,7 +988,7 @@ $r.result.content[0].text
 ### 可选浏览器后端:CDP(跨平台补充场景)
 
 - Chrome / Chromium 可执行文件(机器任意安装路径,或通过 `CHROME_PATH` 环境变量指定)
-- 不需要 WebView2 / Edge Runtime / GUI 组件
+- 不需要 GUI 组件
 
 ### 可选浏览器后端:WebView2(Windows 专属补充场景)
 
@@ -770,7 +1003,7 @@ $r.result.content[0].text
 | libcurl 8.20 | **本地源码** `third_party/curl-8.20.0/`(静态编译,Schannel TLS) | 所有源核心 HTTP 请求 |
 | nlohmann/json | FetchContent 从 GitHub 拉取 | JSON 序列化/反序列化 |
 | SQLite | **本地源码** `third_party/sqlite/sqlite3.c`(已内置) | 统一缓存层 |
-| WebView2 SDK | FetchContent 从 NuGet 下载(仅 WEBVIEW2 后端) | Windows 浏览器后端 |
+
 | Chrome / Chromium | 系统预装(仅 CDP 后端) | 跨平台浏览器后端 |
 
 ## 构建
@@ -865,28 +1098,7 @@ research-mcp.exe
   └─ ExecuteScript(js): send_cdp("Runtime.evaluate", {expression, returnByValue})
 ```
 
-### CDP vs WebView2 对比
-
-| 维度 | WebView2 | CDP |
-|---|---|---|
-| 平台 | Windows 10/11 | Windows / Linux / macOS |
-| GUI 依赖 | 需要 Edge Runtime | 零 GUI, 纯 headless |
-| Chromium 版本 | 跟随系统 Edge | 跟随独立 Chrome 可执行文件 |
-| 进程模型 | 嵌入同一进程的 WebView | 独立 Chrome 进程 (PID 记录, Destroy 时 kill) |
-| 通信方式 | WebView2 C++ API 同步回调 | 原生 socket + WebSocket 帧 + CDP JSON |
-| 代理隔离 | 由系统/Chrome 决定 | `--proxy` 显式传入 + `CURLOPT_NOPROXY` 确保 loopback 不走代理 |
-| 适合场景 | Windows 桌面应用、CI 少 | Linux 服务器、GitHub Actions、容器、CI 大规模 |
-
-### CDP 后端已知坑 & 修复
-
-| 坑 | 修复 |
-|---|---|
-| `curl_ws_send` 永远失败 (Chrome 回 RST) | 放弃 curl WebSocket 高层 API, 改用原生 Winsock2 + 手写 WS 帧 |
-| Chrome 回 `10053 WSAECONNABORTED` (TCP RST) | **opcode 用了 0x82 (BINARY)** — CDP 协议只接受 0x81 (TEXT), payload 是 UTF-8 JSON |
-| `Page.navigate` 超时, Chrome 不发 id=N 响应 | Chrome 发了**分片帧** (FIN=0 + opcode=0x00 continuation), 之前没拼接 |
-| 代理活着时一切 OK, 代理死了 Page.navigate 同步响应都发不出来 | 不是代码 bug — Chrome 整个网络栈被代理卡死, `--proxy` 必须确保代理存活或不加 |
-| WebSocket upgrade 后 Chrome 立即 exit | `CREATE_NO_WINDOW` 标志导致 headless Chrome 立即退出; CreateProcessW 不传此标志 |
-| UTF-8 命令行乱码 | `MultiByteToWideChar(CP_UTF8, ...)` 手动做 UTF-8→UTF-16, 不能 unsafe char cast |
+### CDP 后端优势 `MultiByteToWideChar(CP_UTF8, ...)` 手动做 UTF-8→UTF-16, 不能 unsafe char cast |
 
 ### 2026-09-10 端到端验证(CDP 后端, 无代理)
 
@@ -948,22 +1160,23 @@ curl -X POST http://127.0.0.1:8788/mcp -d '{...arxiv_search_papers...}'
 | `--port <PORT>` | HTTP MCP server 端口(默认:stdio 模式) |
 | `--proxy <URL>` | 代理 URL(libcurl HTTP 请求走代理;浏览器后端 Chromium 也同步走) |
 | `--kiwix-url <URL>` | Kiwix local server URL (e.g. http://127.0.0.1:8080) |
-| `--gh-profile <DIR>` | (CDP/WebView2 后端)GitHub user data dir |
-| `--arxiv-profile <DIR>` | (CDP/WebView2 后端)arXiv user data dir |
-| `--hn-profile <DIR>` | (CDP/WebView2 后端)HN user data dir |
-| `--pkg-profile <DIR>` | (CDP/WebView2 后端)npm/PyPI user data dir |
-| `--pwc-profile <DIR>` | (CDP/WebView2 后端)Papers with Code user data dir |
-| `--hf-profile <DIR>` | (CDP/WebView2 后端)Hugging Face user data dir |
-| `--s2-profile <DIR>` | (CDP/WebView2 后端)Semantic Scholar user data dir |
-| `--so-profile <DIR>` | (CDP/WebView2 后端)Stack Overflow user data dir |
-| `--cache-smoke-test` | 运行 188 项缓存层烟雾测试(不依赖浏览器后端) |
+| `--gh-profile <DIR>` | (CDP 后端)GitHub user data dir |
+| `--arxiv-profile <DIR>` | (CDP 后端)arXiv user data dir |
+| `--hn-profile <DIR>` | (CDP 后端)HN user data dir |
+| `--pkg-profile <DIR>` | (CDP 后端)npm/PyPI user data dir |
+| `--pwc-profile <DIR>` | (CDP 后端)Papers with Code user data dir |
+| `--hf-profile <DIR>` | (CDP 后端)Hugging Face user data dir |
+| `--s2-profile <DIR>` | (CDP 后端)Semantic Scholar user data dir |
+| `--so-profile <DIR>` | (CDP 后端)Stack Overflow user data dir |
+| `--auto-sprawl [SECONDS]` | 启动后自动蔓延后台线程(默认 300s 每 tick) |
+| `--cache-smoke-test` | 运行缓存层烟雾测试(不依赖浏览器后端) |
 | `--help` / `-h` | 显示帮助 |
 
-> **注意**:核心工具(62 个)已全纯 HTTP,`--xxx-profile` 仅在启用了浏览器后端(CDP/WebView2)并需要通用网页爬取时才有意义。不指定 profile 时,所有核心工具正常工作。
+> **注意**:核心工具已全纯 HTTP,`--xxx-profile` 仅在 CDP 后端需要 Chrome user-data-dir 隔离时才有意义。不指定 profile 时,所有核心工具正常工作。`--proxy` 会自动写入进程环境变量,所有 curl 实例和 CDP Chrome 统一继承。
 
 ## 代理设置
 
-libcurl HTTP 层通过统一配置支持代理;若启用了浏览器后端(CDP/WebView2),Chromium 也会同步走同一代理。代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
+libcurl HTTP 层通过统一配置支持代理;若启用了浏览器后端(CDP),Chromium 也会同步走同一代理。代理优先级:**命令行 `--proxy`** > 环境变量(`HTTPS_PROXY` > `HTTP_PROXY` > `ALL_PROXY`)。
 
 ### 方式 1:命令行参数(推荐)
 
@@ -1396,7 +1609,7 @@ GitHub API 限流(每小时 60 次/未认证)。解决:
 
 ### 无浏览器后端 + 需要通用网页爬取
 
-如果启用了 CDP/WebView2 浏览器后端但 Chrome 无法启动:
+如果启用了 CDP 浏览器后端但 Chrome 无法启动:
 1. `CHROME_PATH` 环境变量是否指向正确路径
 2. Chrome 是否已安装(Windows 默认路径 `C:\Program Files\Google\Chrome\Application\chrome.exe`)
 3. 代理是否生效(CDP 需要 Chrome 进程能访问远程网页)

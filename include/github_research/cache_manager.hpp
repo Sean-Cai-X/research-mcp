@@ -455,6 +455,17 @@ public:
     // ── 蔓延统计 ─────────────────────────────────────────────
     json get_sprawl_stats(const std::string& focus_id = "");
 
+    // ── 态势历史 tick (第 2/3 阶段消息提醒用) ─────────────────
+    // 写入一轮 tick 摘要,返回 tick_index
+    int append_focus_tick_history(const std::string& focus_id,
+                                   const json& snapshot_stats,
+                                   const json& diff_stats,
+                                   const json& growth_report,
+                                   const json& notices = json::array());
+    // 查询最近 N 轮的历史(按 tick_index 降序)
+    std::vector<json> get_focus_tick_history(const std::string& focus_id,
+                                              int limit = 10);
+
 private:
     CacheManager() = default;
     ~CacheManager() { shutdown(); }

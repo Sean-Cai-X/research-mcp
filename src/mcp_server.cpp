@@ -1,4 +1,4 @@
-#include "github_research/mcp_server.hpp"
+﻿#include "github_research/mcp_server.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
@@ -14,14 +14,11 @@
 #include "github_research/semanticscholar_tools.hpp"
 #include "github_research/stackoverflow_tools.hpp"
 #include "github_research/webview_helpers.hpp"
+#include "github_research/focus_engine.hpp"
+#include "github_research/situation_engine.hpp"
 
-// 后端实现头文件: 根据编译宏选择
-#ifdef RESEARCH_MCP_USE_WEBVIEW2
-#include "github_research/webview_session.hpp"
-#endif
-#ifdef RESEARCH_MCP_USE_CDP
+// 后端实现头文件: 固定 CDP
 #include "github_research/browser_session_cdp.hpp"
-#endif
 
 #include <iostream>
 #include <string>
@@ -36,19 +33,14 @@
 
 namespace github_research {
 
-// ============ 后端工厂: 根据编译宏创建 IBrowserSession 实例 ============
+// ============ 后端工厂: 固定 CDP ============
 namespace {
 std::unique_ptr<IBrowserSession> create_browser_session() {
-#ifdef RESEARCH_MCP_USE_CDP
     return std::make_unique<CdpBrowserSession>();
-#else
-    // 默认 WebView2
-    return std::make_unique<WebViewSession>();
-#endif
 }
 
 // 轻量 Stub: 纯虚基类 IBrowserSession 的最小实现,IsReady()=false
-// 用于 hn 索引类工具(不依赖 WebView2,但签名需要 session 引用)
+// 用于 hn 索引类工具(不依赖浏览器后端,但签名需要 session 引用)
 class StubBrowserSession : public IBrowserSession {
 public:
     bool Init(const std::string&, const std::string& = "", const std::string& = "") override { return false; }
@@ -89,6 +81,10 @@ struct DbgLog {
 // tools.cpp 中实现的 GitHub 工具分发函数
 json dispatch_tool_call(GitHubClient& client, const json& params);
 
+// 引用溯源包装(文件末尾实现)
+static json enrich_with_source_info(const json& mcp_response,
+                                    const std::string& tool_name);
+
 McpServer::McpServer(std::optional<std::string> token, int timeout_seconds)
     : client_(token, timeout_seconds) {
     // 注册 GitHub 数据源 + source_fetch 回调
@@ -116,6 +112,7 @@ McpServer::McpServer(std::optional<std::string> token, int timeout_seconds)
 }
 
 McpServer::~McpServer() {
+    stop_auto_sprawl();  // 先停后台蔓延线程
     shutdown_arxiv();
     shutdown_hackernews();
     shutdown_package();
@@ -128,6 +125,69 @@ McpServer::~McpServer() {
 void McpServer::set_proxy(const std::string& proxy_url) {
     proxy_url_ = proxy_url;
     client_.set_proxy(proxy_url);
+}
+
+// ============================================================================
+// 焦点域自动蔓延后台线程
+// 周期扫描所有 active 的 focus,对每个执行一次 sprawl_tick
+// ============================================================================
+void McpServer::start_auto_sprawl(int interval_seconds, int max_nodes_per_tick) {
+    if (auto_sprawl_running_.exchange(true)) {
+        log("auto_sprawl already running");
+        return;
+    }
+    auto_sprawl_interval_sec_ = interval_seconds;
+    log("auto_sprawl starting: interval=" + std::to_string(interval_seconds) + "s, max_nodes=" + std::to_string(max_nodes_per_tick));
+
+    auto_sprawl_thread_ = std::thread([this, max_nodes_per_tick]() {
+        CacheManager& cm = CacheManager::instance();
+        while (auto_sprawl_running_.load()) {
+            // 休眠 interval,但每秒检查一次是否要退出
+            for (int i = 0; i < auto_sprawl_interval_sec_ && auto_sprawl_running_.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (!auto_sprawl_running_.load()) break;
+
+            // 扫描所有 focus
+            try {
+                auto focus_list = cm.list_focuses();
+                if (focus_list.empty()) continue;
+
+                int tick_count = 0;
+                for (const auto& f : focus_list) {
+                    std::string fid = f.value("focus_id", "");
+                    if (fid.empty()) continue;
+                    // 跳过非 active 的 focus
+                    std::string fstatus = f.value("status", "active");
+                    if (fstatus != "active") continue;
+
+                    log("auto_sprawl tick: focus=" + fid);
+                    try {
+                        json result = focus_engine::run_sprawl_tick(fid, max_nodes_per_tick, false);
+                        int new_nodes = result.value("total_new", 0);
+                        int boundary  = result.value("total_boundary", 0);
+                        log("auto_sprawl result: focus=" + fid + " new=" + std::to_string(new_nodes)
+                            + " boundary=" + std::to_string(boundary));
+                        tick_count++;
+                    } catch (const std::exception& e) {
+                        log(std::string("auto_sprawl tick exception: ") + e.what());
+                    }
+                }
+                log("auto_sprawl round complete: " + std::to_string(tick_count) + " focuses ticked");
+            } catch (const std::exception& e) {
+                log(std::string("auto_sprawl scan exception: ") + e.what());
+            }
+        }
+        log("auto_sprawl thread exiting");
+    });
+}
+
+void McpServer::stop_auto_sprawl() {
+    if (!auto_sprawl_running_.exchange(false)) return;
+    if (auto_sprawl_thread_.joinable()) {
+        auto_sprawl_thread_.join();
+    }
+    log("auto_sprawl stopped");
 }
 
 // ============ 通用 init/shutdown 辅助 ============
@@ -785,7 +845,7 @@ int McpServer::run() {
     // 初始化 WebView2(一次)
     if (!client_.is_ready()) {
         // WebView2 在首次 HTTP 请求时延迟初始化,这里不阻塞
-        log("webview2 will be initialized on first request");
+        log("Chrome (CDP) will be initialized on first request");
     }
 
     std::string line;
@@ -881,7 +941,7 @@ json McpServer::handle_initialize(const json& params) {
     // 部分 MCP 客户端(如 llama.cpp b10333 HTTP 客户端)栈缓冲区溢出崩溃。
     // MCP 协议规定 instructions 是简短描述,不应承载完整 system prompt。
     std::string instructions =
-        "GitHub deep research assistant. 8 sources: GitHub API + arXiv/HN/Pkg/PWC/HF/S2/SO (WebView2). "
+        "GitHub deep research assistant. 8 sources: GitHub API + arXiv/HN/Pkg/PWC/HF/S2/SO (libcurl + CDP fallback). "
         "CRITICAL: always call github_get_branches before github_get_commits, "
         "then call github_get_commits per-branch with branch=<name>. "
         "Default branch commits may be stale; active development is often on non-default branches.";
@@ -2094,6 +2154,30 @@ json McpServer::handle_tools_list() {
                 })}
             },
             {
+                {"name", "focus_snapshot"},
+                {"description", "Focus snapshot (layer 1 of situation awareness): full node+relation+stats dump of current focus state."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
+                {"name", "focus_situation_report"},
+                {"description", "Situation awareness full pipeline (baseline->sprawl->current->diff->growth_report+main_roads Top3). Returns structured growth_report (new boundary/active/pruned/direction distribution/key paths) + main_roads Top3 (node-degree 0.4 + relation-type 0.3 + seed-distance 0.3)."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"focus_id", json::object({{"type","string"}})},
+                        {"max_nodes_per_tick", json::object({{"type","integer"},{"default",10}})},
+                        {"skip_sprawl_tick", json::object({{"type","boolean"},{"default",false}})}
+                    })},
+                    {"required", json::array({"focus_id"})}
+                })}
+            },
+            {
                 {"name", "focus_estimate_relevance"},
                 {"description", "Debug: estimate relevance of candidate entity against focus."},
                 {"inputSchema", json::object({
@@ -2233,19 +2317,19 @@ json McpServer::handle_tools_call(const json& params) {
     if (!args.is_object()) args = json::object();
 
     DBG_LOG("rpc") << "handle_tools_call: name=" << name;
-    // 按前缀路由到各源 dispatcher
-    if (name.rfind("arxiv_", 0) == 0)  return dispatch_arxiv_tool(name, args);
-    if (name.rfind("hn_", 0) == 0)     return dispatch_hn_tool(name, args);
-    if (name.rfind("pkg_", 0) == 0)    return dispatch_pkg_tool(name, args);
-    if (name.rfind("pwc_", 0) == 0)    return dispatch_pwc_tool(name, args);
-    if (name.rfind("hf_", 0) == 0)     return dispatch_hf_tool(name, args);
-    if (name.rfind("s2_", 0) == 0)     return dispatch_s2_tool(name, args);
-    if (name.rfind("so_", 0) == 0)     return dispatch_so_tool(name, args);
-    if (name.rfind("research_", 0) == 0) return dispatch_research_tool(name, args);
-    if (name.rfind("wiki_", 0) == 0)     return dispatch_wiki_tool(name, args);
-    if (name == "web_search")           return dispatch_focus_tool(name, args);
-    if (name.rfind("focus_", 0) == 0)    return dispatch_focus_tool(name, args);
-    if (name.rfind("entity_", 0) == 0)   return dispatch_focus_tool(name, args);
+    // 按前缀路由到各源 dispatcher —— 统一加 enrich_with_source_info 注入 _source 溯源
+    if (name.rfind("arxiv_", 0) == 0)  return enrich_with_source_info(dispatch_arxiv_tool(name, args), name);
+    if (name.rfind("hn_", 0) == 0)     return enrich_with_source_info(dispatch_hn_tool(name, args), name);
+    if (name.rfind("pkg_", 0) == 0)    return enrich_with_source_info(dispatch_pkg_tool(name, args), name);
+    if (name.rfind("pwc_", 0) == 0)    return enrich_with_source_info(dispatch_pwc_tool(name, args), name);
+    if (name.rfind("hf_", 0) == 0)     return enrich_with_source_info(dispatch_hf_tool(name, args), name);
+    if (name.rfind("s2_", 0) == 0)     return enrich_with_source_info(dispatch_s2_tool(name, args), name);
+    if (name.rfind("so_", 0) == 0)     return enrich_with_source_info(dispatch_so_tool(name, args), name);
+    if (name.rfind("research_", 0) == 0) return enrich_with_source_info(dispatch_research_tool(name, args), name);
+    if (name.rfind("wiki_", 0) == 0)     return enrich_with_source_info(dispatch_wiki_tool(name, args), name);
+    if (name == "web_search")           return enrich_with_source_info(dispatch_focus_tool(name, args), name);
+    if (name.rfind("focus_", 0) == 0)    return enrich_with_source_info(dispatch_focus_tool(name, args), name);
+    if (name.rfind("entity_", 0) == 0)   return enrich_with_source_info(dispatch_focus_tool(name, args), name);
 
     // system_* 诊断工具 (内联实现, 直接调 CacheManager)
     if (name.rfind("system_", 0) == 0) {
@@ -2259,7 +2343,7 @@ json McpServer::handle_tools_call(const json& params) {
             result["source_health"]     = cm.get_source_health();
             result["engines"]           = web_search_engine_status();
             try { result["focus_overview"] = cm.get_sprawl_stats(""); } catch (...) {}
-            return McpSuccess(result);
+            return enrich_with_source_info(McpSuccess(result), name);
         }
         if (name == "system_list_cache") {
             std::string st = args.value("source_type", std::string(""));
@@ -2267,13 +2351,13 @@ json McpServer::handle_tools_call(const json& params) {
             if (lim < 1) lim = 1;
             if (lim > 200) lim = 200;
             json arr = cm.list_cache(st, lim);
-            return McpSuccess({{"count", arr.size()}, {"entries", arr}});
+            return enrich_with_source_info(McpSuccess({{"count", arr.size()}, {"entries", arr}}), name);
         }
-        return McpError("ERROR: unknown system tool: " + name);
+        return enrich_with_source_info(McpError("ERROR: unknown system tool: " + name), name);
     }
 
     // GitHub 工具走原路径
-    return dispatch_tool_call(client_, params);
+    return enrich_with_source_info(dispatch_tool_call(client_, params), name);
 }
 
 // === HTTP 模式 ===
@@ -2389,7 +2473,7 @@ int McpServer::run_http(int port) {
     this->log("server starting in HTTP mode on port " + std::to_string(port));
 
     if (!client_.is_ready()) {
-        this->log("webview2 will be initialized on first request");
+        this->log("Chrome (CDP) will be initialized on first request");
     }
 
     // 用指针以便 lambda 能引用 server 并触发 stop()
@@ -2521,6 +2605,87 @@ json McpServer::dispatch_focus_tool(const std::string& tool_name, const json& ar
         if (tool_name == "focus_prune")   return ToolFocusPrune(args);
         if (tool_name == "focus_promote") return ToolFocusPromote(args);
         if (tool_name == "focus_sprawl_tick") return ToolFocusSprawlTick(args);
+        if (tool_name == "focus_snapshot") {
+            // 纯快照工具:返回当前焦点域完整状态(节点+关系+统计)
+            std::string fid = args.value("focus_id", "");
+            if (fid.empty()) return McpError("ERROR: focus_id required");
+            json snap = situation_engine::snapshot_focus(fid);
+            return McpSuccess(snap);
+        }
+        if (tool_name == "focus_situation_report") {
+            // 四层态势感知 MVP:baseline 快照 → sprawl → current 快照 → diff + 解析
+            std::string fid = args.value("focus_id", "");
+            if (fid.empty()) return McpError("ERROR: focus_id required");
+            int max_nodes = args.value("max_nodes_per_tick", 10);
+            bool skip_tick = args.value("skip_sprawl_tick", false);
+
+            json baseline = situation_engine::snapshot_focus(fid);
+            if (baseline.value("nodes", json::array()).empty() &&
+                baseline.value("stats", json::object()).value("total_nodes", 0) == 0) {
+                return McpError("ERROR: focus has no members — create or seed it first");
+            }
+
+            json sprawl_result;
+            if (!skip_tick) {
+                sprawl_result = focus_engine::run_sprawl_tick(fid, max_nodes, false);
+            }
+
+            json current = situation_engine::snapshot_focus(fid);
+            json report = situation_engine::build_situation_report(baseline, current);
+            report["sprawl_tick"] = skip_tick ? json::object({{"skipped", true}}) : sprawl_result;
+
+            // ── 第 2/3 阶段:三层通知引擎 ──
+            CacheManager& cm = CacheManager::instance();
+            auto history = cm.get_focus_tick_history(fid, 5);
+
+            json notices = json::array();
+            // 1. Flash 异动 (最高优先级)
+            auto flashes = situation_engine::detect_flash_events(
+                report.value("diff", json::object()),
+                report.value("growth_report", json::object()),
+                current, history);
+            for (auto& f : flashes) notices.push_back(std::move(f));
+            // 2. 重要消息提醒
+            auto important = situation_engine::detect_important_notices(
+                report.value("diff", json::object()),
+                report.value("growth_report", json::object()),
+                current, history);
+            for (auto& n : important) notices.push_back(std::move(n));
+            // 3. 普通消息提醒
+            auto normal = situation_engine::detect_normal_notices(
+                report.value("diff", json::object()),
+                report.value("growth_report", json::object()),
+                history);
+            for (auto& n : normal) notices.push_back(std::move(n));
+
+            report["notices"] = notices;
+            report["flash_events"] = flashes;
+            report["important_notices"] = important;
+
+            // ── 第 4 层:事件研判 (嵌入通知,不额外增加数据量) ──
+            auto judged_notices = situation_engine::judge_notices(
+                notices,
+                report.value("diff", json::object()),
+                report.value("growth_report", json::object()),
+                current, history);
+            report["notices"] = judged_notices;
+
+            // ── 写本轮 tick 历史 ──
+            json diff_stats = report.value("diff", json::object()).value("stats", json::object());
+            json tick_snap  = current.value("stats", json::object());
+            json tick_growth = report.value("growth_report", json::object());
+            int tick_idx = cm.append_focus_tick_history(
+                fid, tick_snap, diff_stats, tick_growth, judged_notices);
+            report["tick_index"] = tick_idx;
+
+            // ── 第一阶段:增量节点基础信息卡 ──
+            json node_cards = json::array();
+            for (const auto& n : report.value("diff", json::object()).value("added_nodes", json::array()))
+                node_cards.push_back(situation_engine::make_node_card(n));
+            report["node_cards"] = node_cards;
+
+            return McpSuccess(report);
+        }
         if (tool_name == "focus_estimate_relevance") return ToolFocusEstimateRelevance(args);
         if (tool_name == "focus_extract_tick") return ToolFocusExtractTick(args);
         if (tool_name == "focus_gaps_detect") return ToolFocusGapsDetect(args);
@@ -2535,6 +2700,75 @@ json McpServer::dispatch_focus_tool(const std::string& tool_name, const json& ar
     }
     DBG_LOG("focus") << "dispatch_focus_tool: unknown tool " << tool_name;
     return McpError("ERROR: unknown focus tool: " + tool_name);
+}
+
+// ============================================================================
+// 引用溯源包装:给 MCP content 里的 json 注入 _source 元信息
+// 用法:return enrich_with_source_info(dispatch_xxx_tool(...), tool_name);
+// 不破坏原有结构 — 只追加字段,错误响应(isError=true)也同样注入
+// ============================================================================
+static json enrich_with_source_info(const json& mcp_response,
+                                    const std::string& tool_name) {
+    try {
+        // 1. 构造 source_id(工具名 + 版本号占位,将来可接 git describe)
+        std::string source_id = tool_name;
+
+        // 2. fetched_at — ISO8601 时间戳 (UTC)
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_utc{};
+#ifdef _WIN32
+        gmtime_s(&tm_utc, &t);
+#else
+        gmtime_r(&t, &tm_utc);
+#endif
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+
+        // 3. 构造 _source 对象
+        json _source = {
+            {"tool",     tool_name},
+            {"source_id", source_id},
+            {"fetched_at", ts}
+        };
+
+        // 4. 解析 content[0].text → 注入 _source → re-stringify
+        if (mcp_response.contains("content") &&
+            mcp_response["content"].is_array() &&
+            !mcp_response["content"].empty()) {
+            auto content = mcp_response;  // copy
+            std::string text = content["content"][0].value("text", "");
+            try {
+                json inner = json::parse(text);
+                if (inner.is_object()) {
+                    // 工具里已有 "source" / "url" / "endpoint" 字段 → 复制进 _source
+                    if (inner.contains("source") && inner["source"].is_string())
+                        _source["data_source"] = inner["source"].get<std::string>();
+                    if (inner.contains("url") && inner["url"].is_string())
+                        _source["source_url"] = inner["url"].get<std::string>();
+                    if (inner.contains("endpoint") && inner["endpoint"].is_string())
+                        _source["endpoint"] = inner["endpoint"].get<std::string>();
+                    if (inner.contains("cache_hit") && inner["cache_hit"].is_boolean())
+                        _source["cache_hit"] = inner["cache_hit"].get<bool>();
+                    // 合并 _source
+                    inner["_source"] = _source;
+                    content["content"][0]["text"] = inner.dump();
+                }
+                return content;
+            } catch (...) {
+                // content[0].text 不是 json(比如错误消息) → 直接在前面加溯源行
+                std::string enriched_text =
+                    "[source=" + tool_name + ", fetched_at=" + ts + "]\n" + text;
+                auto content = mcp_response;
+                content["content"][0]["text"] = enriched_text;
+                return content;
+            }
+        }
+
+        return mcp_response;
+    } catch (...) {
+        return mcp_response;  // enrich 失败不影响原响应
+    }
 }
 
 } // namespace github_research

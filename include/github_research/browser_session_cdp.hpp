@@ -85,9 +85,19 @@ private:
     // 发送 CDP 命令 (自动分配 id), 返回匹配 id 的完整响应 JSON
     // timeoutMs: 单次命令超时
     // 返回空字符串 = 超时/错误
+    // 内部:若 ws 已断,先自动重连再发送
     std::string send_cdp_command(const std::string& method,
                                 const std::string& paramsJson,
                                 uint32_t timeoutMs);
+
+    // 单次发送/接收(无重连逻辑,供 send_cdp_command 内部调用)
+    std::string do_send_cdp_command_(const std::string& method,
+                                     const std::string& paramsJson,
+                                     uint32_t timeoutMs);
+
+    // 自动重连:基于 debug_port_ 重新走 get_page_ws_url + connect_websocket
+    // 成功返回 true,失败返回 false 并清理 ws_sock_
+    bool auto_reconnect_();
 
     // 启动浏览器级别的 Browser.close (优雅关闭)
     bool send_browser_close();

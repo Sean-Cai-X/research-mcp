@@ -6,14 +6,18 @@
 #include <string>
 #include <mutex>
 #include <memory>
+#include <thread>
+#include <chrono>
 
 namespace github_research {
 
 namespace {
 
-// ─── Curl HTTP client singleton ───
+// ─── S2 HTTP 客户端 + 429 指数退避 + 跨请求 300ms 间隔 ───
 std::mutex g_s2_curl_mutex;
 std::unique_ptr<CurlHttpClient> g_s2_curl;
+std::mutex g_s2_rate_mutex;
+std::chrono::steady_clock::time_point g_s2_last_request;
 
 CurlHttpClient& get_s2_curl() {
     std::lock_guard<std::mutex> lk(g_s2_curl_mutex);
@@ -24,12 +28,41 @@ CurlHttpClient& get_s2_curl() {
     return *g_s2_curl;
 }
 
-HttpResponse fetch_json(const std::string& url) {
+// 跨请求间隔保护 — S2 免费 API 限流非常严格,间隔 300ms 避免 429
+static void s2_rate_limit_wait() {
+    std::lock_guard<std::mutex> lk(g_s2_rate_mutex);
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - g_s2_last_request;
+    auto min_interval = std::chrono::milliseconds(300);
+    if (elapsed < min_interval) {
+        std::this_thread::sleep_for(min_interval - elapsed);
+    }
+    g_s2_last_request = std::chrono::steady_clock::now();
+}
+
+HttpResponse fetch_json(const std::string& url, int max_retries = 2) {
+    s2_rate_limit_wait();
+
     CurlHttpClient& curl = get_s2_curl();
     std::map<std::string, std::string> hdrs;
     hdrs["User-Agent"] = "ResearchMCP/1.0";
     hdrs["Accept"] = "application/json";
-    return curl.get(url, hdrs);
+
+    HttpResponse resp = curl.get(url, hdrs);
+
+    // 429 指数退避重试 (S2 免费 API 限流非常紧)
+    int attempt = 1;
+    while (resp.status_code == 429 && attempt <= max_retries) {
+        int backoff_ms = 500 * (1 << attempt);  // 1000ms, 2000ms
+        std::cerr << "[s2] 429 rate limited, retry " << attempt
+                  << "/" << max_retries << " in " << backoff_ms << "ms" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+        s2_rate_limit_wait();
+        resp = curl.get(url, hdrs);
+        ++attempt;
+    }
+
+    return resp;
 }
 
 // Parse authors array from S2 responses

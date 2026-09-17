@@ -86,6 +86,9 @@ CurlHttpClient::CurlHttpClient(const std::string& user_agent, int timeout_second
     if (!proxy.empty()) {
         // 去掉可能的 "http://" 前缀(libcurl 自动处理协议)
         proxy_url_ = proxy;
+        std::cerr << "[curl] proxy loaded from env: " << proxy_url_ << std::endl;
+    } else {
+        std::cerr << "[curl] no proxy in env (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY all empty)" << std::endl;
     }
 
     // 进程级 curl 全局初始化(线程安全,仅一次)

@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <set>
 #include <cstdlib>
 #include <cstring>
 #include <sys/stat.h>
@@ -42,7 +43,7 @@ BrowserConfig::BrowserConfig() {
 void BrowserConfig::reset_to_builtin_defaults() {
     chrome = ChromeConfig();
     cdp = CdpConfig();
-    cdp.connect_timeout_ms = 5000;  // 从 1500ms 延长到 5000ms
+    cdp.connect_timeout_ms = 3000;  // Chrome headless 启动后 CDP 就绪超时(冷启动合理值)
     session = SessionConfig();
     proxy = ProxyConfig();
     extensions = ExtensionsConfig();
@@ -375,15 +376,18 @@ std::string BrowserConfig::build_chrome_command(
     std::string effective_proxy = extra_proxy.empty() ? proxy.server : extra_proxy;
     if (!effective_proxy.empty()) {
         args += " --proxy-server=\"" + effective_proxy + "\"";
-        // ========== 核心修正：本地回环绕过代理，Chrome 规范用分号分隔 ==========
-        args += " --proxy-bypass-list=\"localhost;127.0.0.1;::1";
-        // 追加配置文件中的自定义 bypass 列表
-        if (!proxy.bypass_list.empty()) {
-            for (const auto& item : proxy.bypass_list) {
-                args += ";" + item;
-            }
+        // ========== proxy-bypass-list:本地回环(硬编码)+ 配置文件自定义项 ==========
+        // 用 set 去重,避免 config 文件里也写了 localhost/127.0.0.1/::1 导致重复拼接
+        std::set<std::string> bypass_set{
+            "localhost", "127.0.0.1", "::1"
+        };
+        for (const auto& item : proxy.bypass_list) bypass_set.insert(item);
+        std::string bypass_str;
+        for (const auto& item : bypass_set) {
+            if (!bypass_str.empty()) bypass_str += ";";
+            bypass_str += item;
         }
-        args += "\"";
+        args += " --proxy-bypass-list=\"" + bypass_str + "\"";
     }
     // ---- 扩展加载 ----
     for (const auto& ep : extensions.load_paths) {

@@ -633,15 +633,48 @@ void CdpBrowserSession::close_websocket() {
 
 // ============================================================================
 // 发送 CDP 命令 + 等待匹配响应
+// 策略:
+//   1. 若 ws_sock_ 显然无效 → 先 auto_reconnect_
+//   2. 第一次 do_send_cdp_command_ → 成功直接返回
+//   3. 第一次返回空(失败/超时) → close_websocket + auto_reconnect_ → 再试一次
+// 这样覆盖两种常见断连场景:(a)socket 句柄已清;(b)socket 句柄还在但底层已断
 // ============================================================================
 std::string CdpBrowserSession::send_cdp_command(const std::string& method,
                                                const std::string& paramsJson,
                                                uint32_t timeoutMs) {
+    bool socket_valid =
 #ifdef _WIN32
-    if (ws_sock_ == INVALID_SOCKET) return "";
+        ws_sock_ != INVALID_SOCKET;
 #else
-    if (ws_sock_ < 0) return "";
+        ws_sock_ >= 0;
 #endif
+
+    if (!socket_valid) {
+        cdp_log("cdp", "ws not connected, attempting reconnect before send ...");
+        if (!auto_reconnect_()) return "";
+        socket_valid = true;
+    }
+
+    // —— 第一次尝试 ——
+    std::string resp = do_send_cdp_command_(method, paramsJson, timeoutMs);
+    if (!resp.empty()) return resp;
+
+    // —— 第一次失败:重连一次 ——
+    cdp_log("cdp", "send failed (empty), trying auto_reconnect + retry ...");
+    close_websocket();
+    if (!auto_reconnect_()) {
+        cdp_log("cdp", "reconnect failed, giving up");
+        return "";
+    }
+
+    // —— 第二次尝试 ——
+    return do_send_cdp_command_(method, paramsJson, timeoutMs);
+}
+
+// —— 内部单次发送/接收(无重连,便于 send_cdp_command 调两次) ——
+std::string CdpBrowserSession::do_send_cdp_command_(const std::string& method,
+                                                    const std::string& paramsJson,
+                                                    uint32_t timeoutMs) {
 
     int myId = ++next_msg_id_;
 
@@ -715,6 +748,48 @@ std::string CdpBrowserSession::send_cdp_command(const std::string& method,
 bool CdpBrowserSession::send_browser_close() {
     std::string resp = send_cdp_command("Browser.close", "", 3000);
     return !resp.empty();
+}
+
+// ============================================================================
+// auto_reconnect_ —— Chrome 进程还活着(debug_port_ 有效),ws 断了时自动重连
+// ============================================================================
+bool CdpBrowserSession::auto_reconnect_() {
+    if (destroyed_.load()) return false;
+    if (!debug_port_) return false;
+
+    cdp_log("cdp", "auto_reconnect_: port=" + std::to_string(debug_port_));
+
+    // 1. 确认 Chrome 进程还活着(简单:HTTP /json/version 能访问)
+    if (!wait_cdp_ready(debug_port_, 2000)) {
+        cdp_log("cdp", "auto_reconnect_: Chrome CDP port not responding, giving up");
+        // Chrome 进程可能死了,标记 session 不再 ready,让上层走 Destroy → Init 完整重启
+        ready_ = false;
+        return false;
+    }
+
+    // 2. 先关旧 socket(哪怕看起来还有效)
+    close_websocket();
+
+    // 3. 拿新 page wsUrl
+    std::string wsUrl = get_page_ws_url(debug_port_);
+    if (wsUrl.empty()) {
+        cdp_log("cdp", "auto_reconnect_: get_page_ws_url failed");
+        return false;
+    }
+
+    // 4. 重连
+    if (!connect_websocket(wsUrl)) {
+        cdp_log("cdp", "auto_reconnect_: connect_websocket failed");
+        return false;
+    }
+
+    cdp_log("cdp", "auto_reconnect_: reconnected OK to " + wsUrl);
+
+    // 5. 重发 enable(Runtime/Page 可能需要重新 enable)
+    send_cdp_command("Runtime.enable", "{}", 3000);
+    send_cdp_command("Page.enable", "{}", 3000);
+
+    return true;
 }
 
 // ============================================================================

@@ -20,9 +20,14 @@ if(MSVC)
 endif()
 
 # ============================================================================
-# 浏览器后端开关: WEBVIEW2 (默认, Windows only) | CDP (跨平台, 零GUI依赖)
+# 浏览器后端: 固定 CDP (跨平台, 零 GUI 依赖)
 # ============================================================================
-option(RESEARCH_MCP_BROWSER_BACKEND "Browser backend: WEBVIEW2 or CDP" WEBVIEW2)
+# WebView2 已完全移除。CDP 后端原生跨平台, 启动独立 Chrome --remote-debugging-port,
+# 通过手写 WebSocket 帧 + CDP JSON 直接通信, 不依赖任何 GUI runtime。
+set(BROWSER_BACKEND_SOURCES
+    src/browser_session_cdp.cpp
+)
+set(BROWSER_COMPILE_DEF RESEARCH_MCP_USE_CDP)
 
 # ============================================================================
 # FetchContent 依赖：仅 nlohmann/json（curl 用本地源码，不走 FetchContent）
@@ -101,50 +106,6 @@ if(NOT EXISTS ${SQLITE_INCLUDE_DIR}/sqlite3.h)
 endif()
 
 # ============================================================================
-# 浏览器后端条件配置
-# ============================================================================
-if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "WEBVIEW2")
-    message(STATUS "=== Browser backend: WebView2 (Windows only) ===")
-    if(NOT WIN32)
-        message(FATAL_ERROR "WebView2 backend only supports Windows. Use -DRESEARCH_MCP_BROWSER_BACKEND=CDP for cross-platform build.")
-    endif()
-
-    # 下载 WebView2 NuGet SDK（仅 WebView2 模式执行）
-    FetchContent_Declare(webview2
-        URL https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.2792.45
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_GetProperties(webview2)
-    if(NOT webview2_POPULATED)
-        FetchContent_Populate(webview2)
-    endif()
-
-    set(WEBVIEW2_INCLUDE_DIR ${webview2_SOURCE_DIR}/build/native/include)
-    set(WEBVIEW2_LIB_PATH     ${webview2_SOURCE_DIR}/build/native/x64/WebView2Loader.dll.lib)
-    set(WEBVIEW2_DLL_PATH     ${webview2_SOURCE_DIR}/runtimes/win-x64/native/WebView2Loader.dll)
-
-    if(NOT EXISTS ${WEBVIEW2_INCLUDE_DIR}/WebView2.h)
-        message(FATAL_ERROR "WebView2.h not found at ${WEBVIEW2_INCLUDE_DIR}")
-    endif()
-
-    set(BROWSER_BACKEND_SOURCES
-        src/webview_session.cpp
-        src/webview_client.cpp
-    )
-    set(BROWSER_COMPILE_DEF RESEARCH_MCP_USE_WEBVIEW2)
-
-elseif(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "CDP")
-    message(STATUS "=== Browser backend: CDP Chrome (cross-platform, zero GUI) ===")
-    set(BROWSER_BACKEND_SOURCES
-        src/browser_session_cdp.cpp
-    )
-    set(BROWSER_COMPILE_DEF RESEARCH_MCP_USE_CDP)
-
-else()
-    message(FATAL_ERROR "Unknown RESEARCH_MCP_BROWSER_BACKEND: ${RESEARCH_MCP_BROWSER_BACKEND}. Use WEBVIEW2 or CDP.")
-endif()
-
-# ============================================================================
 # 主目标定义
 # ============================================================================
 add_executable(research-mcp
@@ -186,6 +147,7 @@ add_executable(research-mcp
     src/focus_attr_engine.cpp
     src/focus_track_engine.cpp
     src/focus_web_search.cpp
+    src/situation_engine.cpp
     third_party/sqlite/sqlite3.c
 )
 
@@ -195,11 +157,6 @@ target_include_directories(research-mcp PRIVATE
 )
 
 target_compile_definitions(research-mcp PRIVATE ${BROWSER_COMPILE_DEF})
-
-# WebView2 专属头文件（仅 WebView2 模式加入包含路径）
-if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "WEBVIEW2")
-    target_include_directories(research-mcp PRIVATE ${WEBVIEW2_INCLUDE_DIR})
-endif()
 
 # ============================================================================
 # 统一链接配置
@@ -225,11 +182,6 @@ else()
     target_link_libraries(research-mcp PRIVATE pthread dl)
 endif()
 
-# WebView2 静态库（仅 WebView2 模式链接）
-if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "WEBVIEW2" AND WIN32)
-    target_link_libraries(research-mcp PRIVATE ${WEBVIEW2_LIB_PATH})
-endif()
-
 # ============================================================================
 # MSVC 编译选项
 # ============================================================================
@@ -239,22 +191,11 @@ if(MSVC)
 endif()
 
 # ============================================================================
-# POST_BUILD：复制运行时 DLL
-# ============================================================================
-if(RESEARCH_MCP_BROWSER_BACKEND STREQUAL "WEBVIEW2" AND WIN32)
-    add_custom_command(TARGET research-mcp POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${WEBVIEW2_DLL_PATH}
-            $<TARGET_FILE_DIR:research-mcp>/WebView2Loader.dll
-    )
-endif()
-
-# ============================================================================
 # 诊断输出
 # ============================================================================
 message(STATUS "")
 message(STATUS "=== research-mcp 配置汇总 ===")
-message(STATUS "  Backend:       ${RESEARCH_MCP_BROWSER_BACKEND}")
+message(STATUS "  Backend:       CDP (fixed, no WebView2)")
 message(STATUS "  CURL target:   CURL::libcurl (静态库, Schannel TLS)")
 message(STATUS "  SQLITE:        ${SQLITE_INCLUDE_DIR}")
 message(STATUS "  nlohmann:      ${nlohmann_json_DIR}")
