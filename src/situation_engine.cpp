@@ -1,4 +1,4 @@
-#include "github_research/situation_engine.hpp"
+﻿#include "github_research/situation_engine.hpp"
 #include "github_research/cache_manager.hpp"
 #include <cmath>
 #include <map>
@@ -669,14 +669,14 @@ json detect_flash_events(const json& diff,
     if (!history.empty()) {
         prev_dir = history[0].value("growth_report", json::object()).value("direction_distribution", json::object());
         for (auto it = prev_dir.begin(); it != prev_dir.end(); ++it)
-            prev_total += it.value();
+            prev_total += it.value().get<int>();
     } else {
         // 无历史:用 current.snapshot_stats 的 depth_distribution 近似
         prev_dir = current.value("stats", json::object()).value("depth_distribution", json::object());
     }
 
     int cur_total = 0;
-    for (auto it = cur_dir.begin(); it != cur_dir.end(); ++it) cur_total += it.value();
+    for (auto it = cur_dir.begin(); it != cur_dir.end(); ++it) cur_total += it.value().get<int>();
 
     if (cur_total >= 3 && prev_total > 0) {
         // 找本轮各方向中,在前序占比 < 20% 的那些方向
