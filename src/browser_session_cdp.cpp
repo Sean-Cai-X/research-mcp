@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // CdpBrowserSession — Chrome DevTools Protocol 远程浏览器会话实现
 //
 // 依赖:
@@ -353,7 +353,7 @@ static bool ws_send_binary_frame(SockT sock, const char* data, size_t len) {
     }
     // hex dump header for debug
     std::string hx;
-    for (auto b : header) { char buf[4]; sprintf_s(buf, "%02X ", (unsigned char)b); hx += buf; }
+    for (auto b : header) { char buf[4]; snprintf(buf, sizeof(buf), "%02X ", (unsigned char)b); hx += buf; }
     cdp_log("ws", std::string("SEND frame hdr[") + std::to_string(hSent) + "]=" + hx
            + " payload_len=" + std::to_string(len));
     return true;

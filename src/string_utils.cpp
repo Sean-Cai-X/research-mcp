@@ -1,5 +1,8 @@
-#include "github_research/string_utils.hpp"
+﻿#include "github_research/string_utils.hpp"
+#ifdef _WIN32
 #include <windows.h>
+#endif
+#include <cstdint>
 #include <sstream>
 #include <iomanip>
 #include <set>
@@ -8,6 +11,7 @@ namespace github_research {
 
 std::wstring to_wstring(const std::string& utf8) {
     if (utf8.empty()) return std::wstring();
+#ifdef _WIN32
     int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(),
                                    static_cast<int>(utf8.size()),
                                    nullptr, 0);
@@ -16,10 +20,28 @@ std::wstring to_wstring(const std::string& utf8) {
                         static_cast<int>(utf8.size()),
                         wide.data(), wlen);
     return wide;
+#else
+    // Linux: std::wstring uses UTF-32, simple code point copy
+    std::wstring out;
+    out.reserve(utf8.size());
+    size_t i = 0;
+    while (i < utf8.size()) {
+        unsigned char c = static_cast<unsigned char>(utf8[i]);
+        uint32_t cp = 0;
+        if (c < 0x80) { cp = c; i += 1; }
+        else if ((c & 0xE0) == 0xC0) { cp = (c & 0x1F) << 6; cp |= utf8[i+1] & 0x3F; i += 2; }
+        else if ((c & 0xF0) == 0xE0) { cp = (c & 0x0F) << 12; cp |= (utf8[i+1] & 0x3F) << 6; cp |= utf8[i+2] & 0x3F; i += 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = (c & 0x07) << 18; cp |= (utf8[i+1] & 0x3F) << 12; cp |= (utf8[i+2] & 0x3F) << 6; cp |= utf8[i+3] & 0x3F; i += 4; }
+        else { ++i; continue; }
+        out.push_back(static_cast<wchar_t>(cp));
+    }
+    return out;
+#endif
 }
 
 std::string to_utf8(const std::wstring& wide) {
     if (wide.empty()) return std::string();
+#ifdef _WIN32
     int ulen = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
                                    static_cast<int>(wide.size()),
                                    nullptr, 0, nullptr, nullptr);
@@ -28,6 +50,19 @@ std::string to_utf8(const std::wstring& wide) {
                         static_cast<int>(wide.size()),
                         utf8.data(), ulen, nullptr, nullptr);
     return utf8;
+#else
+    // Linux: UTF-32 to UTF-8
+    std::string out;
+    out.reserve(wide.size() * 4);
+    for (wchar_t wc : wide) {
+        uint32_t cp = static_cast<uint32_t>(wc);
+        if (cp < 0x80) { out.push_back(static_cast<char>(cp)); }
+        else if (cp < 0x800) { out.push_back(static_cast<char>(0xC0 | (cp >> 6))); out.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+        else if (cp < 0x10000) { out.push_back(static_cast<char>(0xE0 | (cp >> 12))); out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); out.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+        else { out.push_back(static_cast<char>(0xF0 | (cp >> 18))); out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F))); out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F))); out.push_back(static_cast<char>(0x80 | (cp & 0x3F))); }
+    }
+    return out;
+#endif
 }
 
 std::string url_encode(const std::string& value) {
