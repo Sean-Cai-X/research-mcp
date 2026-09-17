@@ -1,6 +1,9 @@
 #include "github_research/curl_http_client.hpp"
 
 #include <curl/curl.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -48,6 +51,7 @@ size_t header_cb(char* buffer, size_t size, size_t nitems, void* userdata) {
 
 // 获取 exe 同目录下的 curl-ca-bundle.crt 路径(运行时由 CMake 复制)
 std::string get_ca_bundle_path() {
+#ifdef _WIN32
     wchar_t exe_path[MAX_PATH] = {0};
     if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0) return "";
     std::wstring ws(exe_path);
@@ -63,6 +67,13 @@ std::string get_ca_bundle_path() {
     WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), -1,
                         &out[0], len, nullptr, nullptr);
     return out;
+#else
+    // Linux: curl 默认使用系统 CA 证书 (/etc/ssl/certs/ca-certificates.crt)
+    // 运行时搜索 CURL_CA_BUNDLE 环境变量或返回空让 curl 自动探测
+    const char* env = std::getenv("CURL_CA_BUNDLE");
+    if (env && *env) return env;
+    return "/etc/ssl/certs/ca-certificates.crt";
+#endif
 }
 
 } // namespace
