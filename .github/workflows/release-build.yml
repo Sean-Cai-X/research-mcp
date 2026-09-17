@@ -11,11 +11,12 @@ permissions:
   contents: write
 
 # ============================================================================
-# 所有第三方库由 CMake FetchContent 从官方源码/发行包拉取:
-#   nlohmann/json -> GitHub tag v3.11.3
-#   curl          -> GitHub tag curl-8_20_0 (WebSocket API)
-#   WebView2 SDK  -> NuGet Microsoft.Web.WebView2 (仅 WEBVIEW2 后端)
-#   sqlite3       -> 仓库 third_party/sqlite/ (amalgamation 源码)
+# 依赖来源:
+#   nlohmann/json -> FetchContent, GitHub tag v3.11.3
+#   curl 8.20     -> third_party/curl-8.20.0/ (仓库已内置, 静态 Schannel/OpenSSL)
+#   sqlite3       -> third_party/sqlite/ (amalgamation 源码, 已内置)
+#
+# 浏览器后端: 固定 CDP (已物理删除 WebView2 代码), 无需 CMake 开关
 # ============================================================================
 
 jobs:
@@ -25,14 +26,9 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            backend: WEBVIEW2
-            artifact: research-mcp-windows-x64-webview2.zip
-          - os: windows-latest
-            backend: CDP
-            artifact: research-mcp-windows-x64-cdp.zip
+            artifact: research-mcp-windows-x64.zip
           - os: ubuntu-latest
-            backend: CDP
-            artifact: research-mcp-linux-x64-cdp.tar.gz
+            artifact: research-mcp-linux-x64.tar.gz
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -52,25 +48,21 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       # ── CMake Configure + Build ──────────────────────────────────────────
-      # FetchContent 在 configure 阶段自动从 GitHub/NuGet 拉取:
-      #   Windows:   curl(static+Schannel) + nlohmann_json(static) + WebView2(NuGet zip)
-      #   Linux CDP: curl(static+OpenSSL) + nlohmann_json(static)
+      # 浏览器后端已硬编码 CDP, 不再有 RESEARCH_MCP_BROWSER_BACKEND 开关
       - name: CMake Configure + Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
                 -DCMAKE_BUILD_TYPE=Release `
-                -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded" `
-                -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}"
+                -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded"
           cmake --build build --config Release -j 4
 
       - name: CMake Configure + Build (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release \
-                        -DRESEARCH_MCP_BROWSER_BACKEND="${{ matrix.backend }}"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j"$(nproc)"
 
       # ── 打包 ─────────────────────────────────────────────────────────────
@@ -84,14 +76,7 @@ jobs:
           $exe = if (Test-Path "build/Release/research-mcp.exe") { "build/Release/research-mcp.exe" } else { "build/research-mcp.exe" }
           Copy-Item $exe "deploy/" -Force
 
-          # FetchContent 生成的 curl 是静态链接到 exe 的, 运行时不需要 .dll
-          # 只有 WebView2Loader.dll (NuGet 解压后) 需要带
-          foreach ($rt in @("WebView2Loader.dll")) {
-            foreach ($cand in @("build/Release/$rt", "build/$rt")) {
-              if (Test-Path $cand) { Copy-Item $cand "deploy/" -Force; break }
-            }
-          }
-
+          # curl 静态链接到 exe, SQLite 也静态链接, 无运行时 .dll 依赖
           $zip = "${{ matrix.artifact }}"
           7z a $zip deploy/*
 
@@ -130,37 +115,68 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## 🚀 v0.3.5: FetchContent 纯源码构建 + CDP 跨平台后端
+            ## 🚀 v0.4.0: 四层态势感知 + 事件研判 + CDP 固定后端
 
-            ### 零预编译二进制
+            ### Breaking Changes
 
-            所有依赖由 CMake FetchContent 从官方源码/发行包拉取, 仓库只存源码:
+            - WebView2 已物理删除, 固定 CDP 后端
+            - CMake 不再有后端开关, 直接 cmake -B build 即可
+
+            ### 新特性
+
+            #### 四层态势感知 (Situation Engine)
+            完整嵌入 focus_sprawl_tick 每轮执行周期:
+            - **Layer 1 基准快照**: 蔓延前后各做一次全量快照
+            - **Layer 2 差分计算**: 逐维度对比, 标注来源锚点
+            - **Layer 3 态势解析**: 增量生长报告 + 主干道 Top3 三维加权
+            - **Layer 4 事件研判**: 通用四维度 + 分级通知
+
+            #### 研判层 (Judgement Layer)
+            通用四维度自动解读: 领域定位 / 事件性质 / 影响半径 / 趋势信号,
+            分级输出: flash/important 四维度完整研判 + 参考判断 / normal 标准研判 + 节点卡片
+
+            #### 三层分级通知 (11 类)
+            - flash (4): 跨领域通路 / 枢纽节点接入 / 生长方向突变 / 竞争格局
+            - important (3): 持续停滞 / 大规模修剪 / 核心节点变动
+            - normal (4): 路径耗尽 / 生长停滞 / 节点修剪 / 关系解除
+
+            #### 其他
+            - focus_tick_history SQLite 表 (21 tables total) + 每轮自动落库
+            - --auto-sprawl [SECONDS] CLI flag + 后台自动蔓延线程
+            - 代理统一传递: --proxy 写入进程环境变量, 所有 curl + CDP Chrome 统一继承
+            - CDP WebSocket 自动重连 (2 retry policy)
+            - 引用溯源 _source: 每个工具返回自动注入 source 元数据
+            - S2 429 指数退避 + 300ms 跨请求节流
+            - arXiv OR fallback 首次 all:match 空自动拆词重试
+
+            ### 后端
+
+            | 平台 | 浏览器后端 | 依赖 |
+            |------|-----------|------|
+            | Windows x64 | CDP (固定) | Chrome headless (需系统安装) |
+            | Linux x64   | CDP (固定) | Chrome/Chromium headless |
+
+            ### 依赖来源 (仓库零预编译二进制)
+
             | 依赖 | 来源 |
             |------|------|
-            | nlohmann/json | GitHub tag v3.11.3 |
-            | curl 8.20 | GitHub tag curl-8_20_0 (WebSocket API) |
-            | WebView2 SDK | NuGet Microsoft.Web.WebView2 (仅 WEBVIEW2) |
-            | sqlite3 | third_party/sqlite/ (amalgamation) |
+            | nlohmann/json | FetchContent, GitHub tag v3.11.3 |
+            | curl 8.20 | third_party/curl-8.20.0/ 静态源码 |
+            | sqlite3 | third_party/sqlite/ amalgamation |
 
-            curl 静态链接到 exe, 无运行时 DLL 依赖.
-
-            ### 后端对比
-
-            | 维度 | Windows WebView2 | Windows CDP | Linux CDP |
-            |------|------------------|-------------|-----------|
-            | 需要 Edge Runtime | ✅ | ❌ | ❌ |
-            | 需要 Chrome | ❌ | ✅ | ✅ |
-            | 体积 | 大 | 小 | 小 |
-            | 进程模型 | 嵌入 | 独立 Chrome | 独立 Chrome |
+            curl + SQLite 均静态链接到 exe, 运行时零 .dll 依赖.
 
             ### 快速启动
 
             ```bash
-            # Windows CDP
-            ./research-mcp.exe --port 8771 --arxiv-profile ./profiles/arxiv
+            # Windows (零浏览器依赖, 60+ 核心工具启动即用)
+            ./research-mcp.exe --port 8765 --proxy http://127.0.0.1:7897
 
-            # Linux CDP (需 CHROME_PATH 或系统 Chrome)
-            CHROME_PATH=/usr/bin/google-chrome-stable ./research-mcp --port 8771 --arxiv-profile ./profiles/arxiv
+            # 启用自动蔓延后台线程 (默认 300s 每 tick)
+            ./research-mcp.exe --port 8765 --auto-sprawl --proxy http://127.0.0.1:7897
+
+            # Linux
+            ./research-mcp --port 8765
             ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
