@@ -1,4 +1,4 @@
-﻿# Build output (保留 build/release.args / build/debug.args 用于 GN 通用模板)
+# Build output (保留 build/release.args / build/debug.args 用于 GN 通用模板)
 build/*
 !build/release.args
 !build/debug.args
@@ -35,6 +35,7 @@ CMakeFiles/
 cmake_install.cmake
 *.cmake
 !CMakeLists.txt
+!third_party/**/*.cmake
 
 # Dependencies: 仓库只存源码, 预编译二进制/运行时包全排除
 # FetchContent 下载缓存 (CMake configure 时自动拉, 不在仓库里)
