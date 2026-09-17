@@ -53,8 +53,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -B build -G Ninja `
                 -DCMAKE_BUILD_TYPE=Release `
+                -DCMAKE_C_COMPILER=cl `
+                -DCMAKE_CXX_COMPILER=cl `
                 -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded" `
                 -DCMAKE_VERBOSE_MAKEFILE=ON
           Write-Host "=== CMake configure OK ==="
@@ -63,7 +65,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake --build build --config Release -j 4
+          cmake --build build -j 4
           Write-Host "=== CMake build OK ==="
 
       - name: CMake Configure + Build (Linux)
