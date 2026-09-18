@@ -95,3 +95,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# cppjieba: junction to local pre-install (CMake will try FetchContent if missing)
+third_party/cppjieba/

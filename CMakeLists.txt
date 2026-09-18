@@ -30,24 +30,62 @@ set(BROWSER_BACKEND_SOURCES
 set(BROWSER_COMPILE_DEF RESEARCH_MCP_USE_CDP)
 
 # ============================================================================
-# FetchContent 依赖：仅 nlohmann/json（curl 用本地源码，不走 FetchContent）
+# nlohmann/json: 优先 third_party 本地单头, 缺则 FetchContent
+# curl 用本地源码, 不走 FetchContent
 # ============================================================================
-include(FetchContent)
-set(FETCHCONTENT_QUIET OFF)
+if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/json/include/nlohmann/json.hpp")
+    message(STATUS "  [third_party] nlohmann/json found, skipping FetchContent")
+    add_library(nlohmann_json INTERFACE)
+    target_include_directories(nlohmann_json INTERFACE
+        "${CMAKE_SOURCE_DIR}/third_party/json/include"
+    )
+    add_library(nlohmann_json::nlohmann_json ALIAS nlohmann_json)
+else()
+    include(FetchContent)
+    set(FETCHCONTENT_QUIET OFF)
+    FetchContent_Declare(json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+        GIT_SHALLOW TRUE
+    )
+    set(JSON_BuildTests OFF CACHE INTERNAL "" FORCE)
+    set(JSON_MultipleHeaders OFF CACHE INTERNAL "" FORCE)
+    FetchContent_MakeAvailable(json)
+endif()
 
-# --- nlohmann/json (单头 header-only, GitHub tag v3.11.3) ---
-FetchContent_Declare(json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-    GIT_SHALLOW TRUE
-)
-set(JSON_BuildTests OFF CACHE INTERNAL "" FORCE)
-set(JSON_MultipleHeaders OFF CACHE INTERNAL "" FORCE)
-FetchContent_MakeAvailable(json)
-
-# ======================================================================
-# curl 本地源码编译配置（必须全部在 add_subdirectory 之前设置）
-# ======================================================================
+# ============================================================================
+# cppjieba: 优先 third_party junction (Windows symlink), 否则 FetchContent
+# 目标: cppjieba::cppjieba
+# ============================================================================
+set(CPPJIEBA_SRC "${CMAKE_SOURCE_DIR}/third_party/cppjieba")
+if(EXISTS "${CPPJIEBA_SRC}/CMakeLists.txt")
+    message(STATUS "  [third_party] cppjieba junction found, adding subdirectory")
+    set(CPPJIEBA_TOP_LEVEL_PROJECT OFF CACHE INTERNAL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CPPJIEBA_SRC}" "${CMAKE_BINARY_DIR}/_deps/cppjieba-build" EXCLUDE_FROM_ALL)
+    if(NOT TARGET cppjieba::cppjieba AND TARGET cppjieba)
+        add_library(cppjieba::cppjieba ALIAS cppjieba)
+    endif()
+    # 词典路径传给代码 (运行时 Jieba 构造函数需要)
+    set_source_files_properties(src/wiki_mining.cpp PROPERTIES
+        COMPILE_DEFINITIONS CPPJIEBA_DICT_PATH="${CPPJIEBA_SRC}/dict")
+else()
+    message(STATUS "  [FetchContent] pulling cppjieba from GitHub")
+    include(FetchContent)
+    FetchContent_Declare(cppjieba
+        GIT_REPOSITORY https://github.com/yanyiwu/cppjieba.git
+        GIT_TAG master
+        GIT_SHALLOW TRUE
+    )
+    set(CPPJIEBA_TOP_LEVEL_PROJECT OFF CACHE INTERNAL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(cppjieba)
+    if(NOT TARGET cppjieba::cppjieba AND TARGET cppjieba)
+        add_library(cppjieba::cppjieba ALIAS cppjieba)
+    endif()
+    set_source_files_properties(src/wiki_mining.cpp PROPERTIES
+        COMPILE_DEFINITIONS CPPJIEBA_DICT_PATH="${cppjieba_SOURCE_DIR}/dict")
+endif()
 # 基础构建选项
 set(BUILD_CURL_EXE       OFF CACHE BOOL "" FORCE)  # 不编译 curl 命令行工具
 set(BUILD_CURL_TESTS     OFF CACHE BOOL "" FORCE)  # 不编译测试
@@ -144,6 +182,7 @@ add_executable(research-mcp
     src/local_fs_source.cpp
     src/git_clone_source.cpp
     src/wiki_explorer.cpp
+    src/wiki_mining.cpp
     src/focus_tools.cpp
     src/focus_engine.cpp
     src/focus_attr_engine.cpp
@@ -166,6 +205,7 @@ target_compile_definitions(research-mcp PRIVATE ${BROWSER_COMPILE_DEF})
 target_link_libraries(research-mcp PRIVATE
     nlohmann_json::nlohmann_json
     CURL::libcurl
+    cppjieba
 )
 
 # Windows 系统库

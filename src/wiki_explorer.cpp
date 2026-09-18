@@ -1,4 +1,4 @@
-#include "github_research/wiki_explorer.hpp"
+﻿#include "github_research/wiki_explorer.hpp"
 #include "github_research/webview_helpers.hpp"
 #include <chrono>
 #include <algorithm>
@@ -25,7 +25,8 @@ static bool safe_bool(const json& j, const char* key, bool def = false) {
 }
 
 WikiExplorer::WikiExplorer(DataSourceRegistry& registry, CacheManager& cache)
-    : registry_(registry), cache_(cache) {}
+    : registry_(registry), cache_(cache),
+      mining_(std::make_unique<WikiMiningPipeline>(registry, cache)) {}
 
 bool WikiExplorer::isLocalSource(const std::string& source_id) {
     return source_id == "kiwix_local" || source_id == "local_fs" || source_id == "git_clone";
@@ -183,6 +184,22 @@ json WikiExplorer::discover(const json& args) {
     }
 
     return result;
+
+    // 3. 零命中时自动触发深度挖掘 (第一阶段: 分类树 + 别名/重定向)
+    bool enable_mining = true;
+    if (args.contains("enable_deep_mining") && args["enable_deep_mining"].is_boolean()) {
+        enable_mining = args["enable_deep_mining"].get<bool>();
+    }
+    if (enable_mining && result["resources"].empty() && !query.empty() && repo.empty()) {
+        auto mining_result = mining_->mine(query);
+        if (mining_result.contains("mined_resources")) {
+            for (auto& r : mining_result["mined_resources"]) {
+                result["resources"].push_back(r);
+            }
+        }
+        result["deep_mining"] = mining_result;
+    }
+
 }
 
 // =============================================================

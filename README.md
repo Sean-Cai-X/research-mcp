@@ -1,4 +1,4 @@
-﻿# research-mcp (DeerFlow++)
+# research-mcp (DeerFlow++)
 
 **9 源统一研究 MCP 服务** + **四层态势感知 (Situation Engine)** + **事件研判 (Judgement Layer)** + **CDP 固定浏览器后端** + **SQLite 统一缓存层** + **多源融合 + 熔断降级链** + **三层观测体系 (L1/L2/L3)** + **模块演进时序分析原语**。
 
@@ -500,6 +500,46 @@ Kiwix 本地服务器通过以下方式之一指定(优先级同代理设置):
 2. **环境变量**:`KIWIX_SERVER_URL=http://127.0.0.1:8080`
 
 未配置时,`kiwix_local` 源自动跳过(不启用 Wiki 工具),回退到优先级 2 及以下源。
+### Wiki Mining Pipeline: 深度挖掘 + 编辑距离容错 + 同义变体匹配
+
+在 wiki_discover / wiki_read 基础上增加自动深度挖掘层,核心增强是**查询预处理(query_preprocessor)**:把用户原始查询扩展为一条**优先级递减的查询队列**,让 Kiwix 本地索引即使遇到拼写偏差、技术术语变体、中英文混写也能命中正确条目。
+
+#### 预处理管线
+
+`
+原始查询 (raw_query)
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ query_preprocessor  (static namespace, 无状态纯函数)             │
+│                                                                 │
+│ 1. rule_tokenize      → 英文按 CJK/ASCII 边界切分               │
+│ 2. tryJiebaSegment    → cppjieba 中文分词 (lazy singleton)      │
+│ 3. jieba_normalize    → 分词 + 同义词表注入 (技术域 30+ entries) │
+│ 4. buildQueryQueue    → 组装优先级队列:                          │
+│      [原查询(最高)] → [分词组合] → [同义词变体] → [编辑距离变体(最低)] │
+│                                                                 │
+│ 编辑距离容错 (levenshteinDistance):                             │
+│   - 仅对纯 ASCII 英文词生效 (中文不用)                           │
+│   - len ≥ 5 → max edit distance = 1 (只允许单字符替换)           │
+│   - len < 5 → 不生成变体 (短词易误匹配)                          │
+│   - generate1Substitution: 26 × (len-1) 穷举单替换,去重后入队    │
+│                                                                 │
+│ 技术同义词表 (4 个核心域,宁准勿滥):                              │
+│   kernel:    {mutex → [mutual exclusion, lock], deadlock → ...} │
+│   memory:    {TLB → [translation lookaside buffer], page fault} │
+│   network:   {TCP → [transmission control protocol, socket]}   │
+│   crypto:    {public key → [asymmetric], AES → [advanced encryption standard]} │
+└─────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+WikiMiningPipeline::mine()
+    - 遍历查询队列,命中即停
+    - 自优化闭环: 候选实体 hit_count ≥ 3 → 自动升级 formal
+    - 同源更准条目 → 替换旧 formal (confidence + canonical_uri 更优)
+    │
+    ▼
+persist() → SQLite 缓存 (TTL: formal 30d / 候选 7d)
 
 ## 定向知识雷达 (Focus) 🌐
 
@@ -1003,6 +1043,7 @@ AI 可直接在结论中标注 `[source_id]` 引用,科研严谨性自动对齐�
 | libcurl 8.20 | **本地源码** `third_party/curl-8.20.0/`(静态编译,Schannel TLS) | 所有源核心 HTTP 请求 |
 | nlohmann/json | FetchContent 从 GitHub 拉取 | JSON 序列化/反序列化 |
 | SQLite | **本地源码** `third_party/sqlite/sqlite3.c`(已内置) | 统一缓存层 |
+| cppjieba | **本地 junction** `third_party/cppjieba/`(无则 FetchContent 从 GitHub 拉) | 中文分词 / Wiki Mining 查询预处理 |
 
 | Chrome / Chromium | 系统预装(仅 CDP 后端) | 跨平台浏览器后端 |
 

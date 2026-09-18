@@ -2,7 +2,9 @@
 
 #include "github_research/datasource_registry.hpp"
 #include "github_research/cache_manager.hpp"
+#include "github_research/wiki_mining.hpp"
 #include <nlohmann/json.hpp>
+#include <memory>
 
 namespace github_research {
 
@@ -35,6 +37,9 @@ public:
 private:
     DataSourceRegistry& registry_;
     CacheManager& cache_;
+
+    // Mining pipeline — auto-trigger when discover returns empty
+    std::unique_ptr<WikiMiningPipeline> mining_;
 
     // Cache helpers (source_type="wiki", cache_key=canonical_uri)
     static constexpr const char* CACHE_SOURCE_TYPE = "wiki";
