@@ -167,6 +167,7 @@ add_executable(research-mcp
     src/paperswithcode_tools.cpp
     src/huggingface_tools.cpp
     src/semanticscholar_tools.cpp
+    src/academic_resolver.cpp
     src/stackoverflow_tools.cpp
     src/formatters.cpp
     src/string_utils.cpp

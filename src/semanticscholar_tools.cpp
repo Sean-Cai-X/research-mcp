@@ -1,6 +1,7 @@
 #include "github_research/semanticscholar_tools.hpp"
 #include "github_research/webview_helpers.hpp"
 #include "github_research/cache_manager.hpp"
+#include "github_research/academic_resolver.hpp"
 #include "github_research/curl_http_client.hpp"
 #include <iostream>
 #include <string>
@@ -40,7 +41,7 @@ static void s2_rate_limit_wait() {
     g_s2_last_request = std::chrono::steady_clock::now();
 }
 
-HttpResponse fetch_json(const std::string& url, int max_retries = 2) {
+HttpResponse fetch_json(const std::string& url, int max_retries = 3) {
     s2_rate_limit_wait();
 
     CurlHttpClient& curl = get_s2_curl();
@@ -53,7 +54,7 @@ HttpResponse fetch_json(const std::string& url, int max_retries = 2) {
     // 429 指数退避重试 (S2 免费 API 限流非常紧)
     int attempt = 1;
     while (resp.status_code == 429 && attempt <= max_retries) {
-        int backoff_ms = 500 * (1 << attempt);  // 1000ms, 2000ms
+        int backoff_ms = 1000 * (1 << (attempt - 1));  // 1000ms, 2000ms, 4000ms
         std::cerr << "[s2] 429 rate limited, retry " << attempt
                   << "/" << max_retries << " in " << backoff_ms << "ms" << std::endl;
         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
@@ -380,16 +381,18 @@ json ToolS2SearchAuthor(const json& args) {
 }
 
 // ============================================================
-// 7. ToolS2FetchPaperDetail - layered with cache + entity_mapper
+// 7. ToolS2FetchPaperDetail - 统一五级降级调度器
 // ============================================================
 json ToolS2FetchPaperDetail(const json& args) {
-    std::string paperId;
-    if (args.contains("paper_id") && args["paper_id"].is_string())
-        paperId = args["paper_id"].get<std::string>();
-    if (paperId.empty()) return McpError("ERROR: [s2] 'paper_id' parameter is required");
+    std::string paperId = args.value("paper_id", args.value("s2_paper_id", ""));
+    std::string title   = args.value("title", "");
+    if (paperId.empty() && title.empty())
+        return McpError("ERROR: [s2] 'paper_id' or 'title' parameter is required");
 
     CacheManager& cm = CacheManager::instance();
-    std::string cache_key = "s2:" + paperId;
+
+    // Cache lookup (by paper_id first, then by title)
+    std::string cache_key = paperId.empty() ? "s2:title:" + title : "s2:" + paperId;
     if (cm.is_ready()) {
         auto cached = cm.get("s2", cache_key);
         if (cached && cached->fetch_status == "ok" && cm.is_fresh("s2", cache_key)) {
@@ -404,35 +407,60 @@ json ToolS2FetchPaperDetail(const json& args) {
         }
     }
 
-    json rawArgs = json::object();
-    rawArgs["paper_id"] = paperId;
-    json detail = ToolS2GetPaperDetail(rawArgs);
+    // ── 五级降级链路 ──
+    PaperResult result = resolvePaper(AcademicSource::S2, args);
 
-    json inner;
-    if (detail.contains("content") && detail["content"].is_array() && !detail["content"].empty()) {
-        auto& c = detail["content"][0];
-        if (c.contains("text")) {
-            try { inner = json::parse(c["text"].get<std::string>()); }
-            catch (...) {}
-        }
-    }
-    if (!inner.is_object()) inner = {{"success", false}};
+    // Build unified output
+    json payload = json::object();
+    payload["success"] = result.found;
+    payload["source"] = "s2_api";
+    payload["confidence"] = result.confidence;
+    payload["degradation_level"] = degradationLabel(result.level);
+    payload["fallback_chain"] = result.fallback_chain;
+    payload["is_formal_entity"] = result.found && result.confidence >= 0.8;
+    payload["is_candidate"]     = result.found && result.confidence >= 0.6 && result.confidence < 0.8;
+    payload["is_clue_only"]     = !result.found || result.confidence < 0.6;
+    payload["hard_anchors_ok"]  = hasHardAnchors(result);
 
-    if (inner.value("success", false)) {
-        if (cm.is_ready()) cm.put("s2", cache_key, inner.dump(), "json", 72, "", "ok", "");
-        if (cm.is_ready()) {
-            std::string title = inner.value("title", "");
-            int cites = inner.value("citation_count", 0);
-            std::string pid = inner.value("s2_paper_id", paperId);
+    if (result.found) {
+        payload["title"] = result.title;
+        payload["authors"] = result.authors;
+        payload["year"] = result.year;
+        payload["abstract"] = result.abstract;
+        payload["venue"] = result.venue;
+        payload["s2_paper_id"] = result.external_id;
+        payload["url"] = result.url;
+        payload["citation_count"] = result.citation_count;
+        if (!result.fields_of_study.empty())
+            payload["fields_of_study"] = result.fields_of_study;
+
+        // ── Cache write ──
+        int ttl = result.confidence >= 0.8 ? 72 : 24;
+        std::string status = result.confidence >= 0.6 ? "ok" : "partial";
+        if (cm.is_ready()) cm.put("s2", cache_key, payload.dump(), "json", ttl, "", status, "");
+
+        // ── Entity write (only for formal + hard anchors ok) ──
+        if (cm.is_ready() && result.confidence >= 0.8 && hasHardAnchors(result)) {
+            std::string pid = result.external_id.empty() ? paperId : result.external_id;
             std::string eid = cm.register_entity(
-                "paper", "s2:" + pid.empty() ? paperId : pid, {title}, {"semanticscholar"},
-                {{"paper_id", paperId}, {"citation_count", cites}}, title);
-            cm.register_entity_source(eid, "s2_api", paperId,
-                                      {"title", "abstract", "citation_count"}, 0.95);
-            cm.record_metric(eid, "s2_citations", (double)cites, "s2");
+                "paper", "s2:" + pid, {result.title}, {"semanticscholar"},
+                {{"paper_id", pid}, {"citation_count", result.citation_count},
+                 {"year", result.year}, {"venue", result.venue}},
+                result.title);
+            cm.register_entity_source(eid, "s2_api", pid,
+                                      {"title", "abstract", "citation_count"}, result.confidence);
+            if (result.citation_count > 0)
+                cm.record_metric(eid, "s2_citations", (double)result.citation_count, "s2");
         }
+    } else {
+        // L5: 线索留存 — 仅记录查询意图
+        payload["clue_title"] = title;
+        payload["clue_paper_id"] = paperId;
+        payload["message"] = "All S2 fallback levels exhausted; paper not found";
+        if (cm.is_ready()) cm.put("s2", cache_key, payload.dump(), "json", 6, "", "not_found", "all_levels_exhausted");
     }
-    return WrapMcpResult(inner);
+
+    return WrapMcpResult(payload);
 }
 
 } // namespace github_research
