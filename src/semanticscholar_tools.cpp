@@ -2,6 +2,7 @@
 #include "github_research/webview_helpers.hpp"
 #include "github_research/cache_manager.hpp"
 #include "github_research/academic_resolver.hpp"
+#include "github_research/query_preprocessor.hpp"
 #include "github_research/curl_http_client.hpp"
 #include <iostream>
 #include <string>
@@ -98,6 +99,8 @@ json ToolS2SearchPapers(const json& args) {
     if (count > 50) count = 50;
 
     std::string fields = "title,authors,year,externalIds,url,abstract,citationCount";
+
+    // Primary query
     std::string url = "https://api.semanticscholar.org/graph/v1/paper/search?query="
         + UrlEncodeComponent(query) + "&limit=" + std::to_string(count)
         + "&fields=" + UrlEncodeComponent(fields);
@@ -107,33 +110,101 @@ json ToolS2SearchPapers(const json& args) {
     if (resp.status_code != 200) {
         return McpError("ERROR: [s2] search HTTP " + std::to_string(resp.status_code));
     }
-    try {
-        json data = json::parse(resp.body);
-        json results = json::array();
-        auto items = data.value("data", json::array());
-        for (auto& item : items) {
-            json r;
-            r["s2_paper_id"] = item.value("paperId", "");
-            r["title"] = item.value("title", "");
-            r["abstract"] = item.value("abstract", "");
-            r["year"] = item.value("year", 0);
-            r["citation_count"] = item.value("citationCount", 0);
-            r["url"] = item.value("url", "");
-            r["authors"] = parse_authors(item);
-            r["external_ids"] = item.value("externalIds", json::object());
-            results.push_back(std::move(r));
-        }
-        json payload = {
-            {"success", true},
-            {"source", "s2_api"},
-            {"query", query},
-            {"total_returned", results.size()},
-            {"results", results}
-        };
-        return WrapMcpResult(payload);
-    } catch (const std::exception& e) {
-        return McpError(std::string("ERROR: [s2] search parse failed: ") + e.what());
+    json data;
+    try { data = json::parse(resp.body); } catch (...) {
+        return McpError("ERROR: [s2] search parse failed");
     }
+    json results = json::array();
+    auto items = data.value("data", json::array());
+    for (auto& item : items) {
+        json r;
+        r["s2_paper_id"] = item.value("paperId", "");
+        r["title"] = item.value("title", "");
+        r["abstract"] = item.value("abstract", "");
+        r["year"] = item.value("year", 0);
+        r["citation_count"] = item.value("citationCount", 0);
+        r["url"] = item.value("url", "");
+        r["authors"] = parse_authors(item);
+        r["external_ids"] = item.value("externalIds", json::object());
+        results.push_back(std::move(r));
+    }
+
+    // ── 公共 query_preprocessor 模糊降级链 (联调 S2 300ms 间隔 + 429 退避) ──
+    bool fuzzy_hit = false;
+    std::string fuzzy_variant_used;
+    std::string fuzzy_source_tag;
+    if (results.empty()) {
+        auto queue = buildQueryQueue(query, "");
+        constexpr int kMaxExtraQueries = 3;
+        int extra = 0;
+        for (size_t i = 1; i < queue.size() && extra < kMaxExtraQueries; ++i) {
+            const auto& qs = queue[i];
+            if (qs.variant == query) continue;
+            std::cerr << "[s2] trying variant [" << qs.source_tag << "]: " << qs.variant << std::endl;
+            HttpResponse v_resp = fetch_json(
+                "https://api.semanticscholar.org/graph/v1/paper/search?query="
+                + UrlEncodeComponent(qs.variant) + "&limit=" + std::to_string(count)
+                + "&fields=" + UrlEncodeComponent(fields)
+                + (year.empty() ? "" : "&year=" + UrlEncodeComponent(year))
+            );
+            extra++;
+            if (v_resp.status_code != 200) continue;
+            try {
+                json v_data = json::parse(v_resp.body);
+                json v_results = json::array();
+                auto v_items = v_data.value("data", json::array());
+                for (auto& item : v_items) {
+                    json r;
+                    r["s2_paper_id"] = item.value("paperId", "");
+                    r["title"] = item.value("title", "");
+                    r["abstract"] = item.value("abstract", "");
+                    r["year"] = item.value("year", 0);
+                    r["citation_count"] = item.value("citationCount", 0);
+                    r["url"] = item.value("url", "");
+                    r["authors"] = parse_authors(item);
+                    r["external_ids"] = item.value("externalIds", json::object());
+                    v_results.push_back(std::move(r));
+                }
+                if (!v_results.empty()) {
+                    results = std::move(v_results);
+                    fuzzy_hit = true;
+                    fuzzy_variant_used = qs.variant;
+                    fuzzy_source_tag = qs.source_tag;
+                    std::cerr << "[s2] variant hit (" << qs.source_tag << ") → " << results.size() << " results" << std::endl;
+                    break;
+                }
+            } catch (...) { continue; }
+        }
+    }
+
+    if (results.empty()) {
+        return McpError(std::string("ERROR: [s2] search returned no results for query='") + query + "'");
+    }
+
+    json payload = {
+        {"success", true},
+        {"source", "s2_api"},
+        {"query", query},
+        {"total_returned", results.size()},
+        {"results", results}
+    };
+
+    // ── 风险控制: 模糊命中 → 降置信度 + 溯源标记 ──
+    if (fuzzy_hit) {
+        bool is_fuzzy = isFuzzySource(fuzzy_source_tag);
+        payload["confidence"] = is_fuzzy ? 0.8 : 0.9;
+        payload["_source"] = json::object();
+        payload["_source"]["match_type"] = fuzzy_source_tag;
+        payload["_source"]["fuzzy_variant"] = fuzzy_variant_used;
+        payload["_source"]["fuzzy_source_tag"] = fuzzy_source_tag;
+        payload["_source"]["original_query"] = query;
+    } else {
+        payload["confidence"] = 0.9;
+        payload["_source"] = json::object();
+        payload["_source"]["match_type"] = "exact";
+        payload["_source"]["original_query"] = query;
+    }
+    return WrapMcpResult(payload);
 }
 
 // ============================================================

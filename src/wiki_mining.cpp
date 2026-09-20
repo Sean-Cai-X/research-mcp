@@ -1,349 +1,15 @@
-#include "github_research/wiki_mining.hpp"
+﻿#include "github_research/wiki_mining.hpp"
+#include "github_research/query_preprocessor.hpp"
 #include "github_research/string_utils.hpp"
 
-// cppjieba — 通过 CMake FetchContent / third_party junction 引入
-// 词典路径由 CMake 通过 CPPJIEBA_DICT_PATH 编译宏注入 (utf8 dict 目录)
-#if __has_include("cppjieba/Jieba.hpp")
-  #include "cppjieba/Jieba.hpp"
-  #define RESEARCH_MCP_HAS_CPPJIEBA 1
-#else
-  #define RESEARCH_MCP_HAS_CPPJIEBA 0
-#endif
-#include "github_research/string_utils.hpp"
 #include <algorithm>
-#include <cstring>
 #include <chrono>
 #include <set>
 #include <regex>
 
 namespace github_research {
 
-// =============================================================
-// 查询预处理层 —— 分词 + 结巴容错匹配
-// 嵌在触发层之后、挖掘路径之前, 所有搜索路径的统一入口
-// =============================================================
-namespace query_preprocessor {
-
-// —— Jieba lazy singleton (header-only INTERFACE, 词典路径编译时注入) ——
-#if RESEARCH_MCP_HAS_CPPJIEBA
-static cppjieba::Jieba& jiebaInstance() {
-    static cppjieba::Jieba jb(
-        CPPJIEBA_DICT_PATH "/jieba.dict.utf8",
-        CPPJIEBA_DICT_PATH "/hmm_model.utf8",
-        CPPJIEBA_DICT_PATH "/user.dict.utf8",
-        CPPJIEBA_DICT_PATH "/idf.utf8",
-        CPPJIEBA_DICT_PATH "/stop_words.utf8"
-    );
-    return jb;
-}
-static std::vector<std::string> tryJiebaSegment(const std::string& input) {
-    std::vector<std::string> words;
-    try { jiebaInstance().Cut(input, words, true); } catch (...) { words.clear(); }
-    return words;
-}
-#endif
-
-// 规则分词 (fallback): 空格/连字符/下划线 + 中英文边界分离
-static std::vector<std::string> rule_tokenize(const std::string& input) {
-    std::vector<std::string> tokens;
-    std::string cur;
-    auto flush = [&]() {
-        if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
-    };
-    for (size_t i = 0; i < input.size(); ++i) {
-        char c = input[i];
-        if (c == ' ' || c == '-' || c == '_' || c == '/' || c == '\\') {
-            flush();
-            continue;
-        }
-        // 中英文边界: 中文字符 (UTF-8 3字节) 前后切分
-        // 简化: 检测 ASCII ↔ 非 ASCII 边界
-        bool is_ascii = (static_cast<unsigned char>(c) < 0x80);
-        if (i > 0) {
-            char prev = input[i-1];
-            bool prev_ascii = (static_cast<unsigned char>(prev) < 0x80);
-            if (is_ascii != prev_ascii) flush();
-        }
-        cur += c;
-    }
-    flush();
-    return tokens;
-}
-
-// 常见技术后缀剥离
-static const char* kStripSuffixes[] = {
-    "优化", "算法", "技术", "方法", "实现", "机制",
-    "优化器", "策略", "框架", "架构", "模型", "系统",
-    "optimization", "algorithm", "technique", "method",
-    "implementation", "mechanism", "optimizer", "strategy",
-    "framework", "architecture", "model", "system"
-};
-
-static std::string stripSuffix(const std::string& token) {
-    std::string lower = to_lower(token);
-    for (auto* suf : kStripSuffixes) {
-        std::string s = suf;
-        auto pos = lower.rfind(s);
-        if (pos != std::string::npos && pos + s.size() == lower.size() &&
-            pos > 0 && token.size() > pos) {
-            return token.substr(0, pos);
-        }
-    }
-    return token;
-}
-
-// 结巴容错: 大小写 + 符号归一, 生成一组形态变体
-static std::vector<std::string> jieba_normalize(const std::string& term) {
-    std::vector<std::string> result;
-    auto add = [&](const std::string& s) {
-        if (s.empty()) return;
-        for (auto& e : result) if (e == s) return;
-        result.push_back(s);
-    };
-
-    add(term);
-    std::string lower = to_lower(term);
-    add(lower);
-
-    // 符号归一: 所有非字母数字 → 空格
-    std::string sym_norm;
-    for (char c : term) {
-        unsigned char uc = static_cast<unsigned char>(c);
-        if (isalnum(uc) || uc >= 0x80) sym_norm += c;
-        else sym_norm += ' ';
-    }
-    std::string no_space;
-    for (char c : sym_norm) if (c != ' ') no_space += c;
-    if (!no_space.empty()) add(no_space);
-
-    std::string underscore;
-    for (char c : sym_norm) {
-        if (c == ' ') underscore += '_';
-        else underscore += c;
-    }
-    add(underscore);
-
-    // 缩写提取 (首字母大写)
-    std::string acronym;
-    bool next_upper = true;
-    for (char c : sym_norm) {
-        if (c == ' ') { next_upper = true; continue; }
-        if (next_upper && (isalnum(static_cast<unsigned char>(c)) || static_cast<unsigned char>(c) >= 0x80)) {
-            acronym += static_cast<char>(toupper(static_cast<unsigned char>(c)));
-            next_upper = false;
-        }
-    }
-    if (acronym.size() >= 2) add(acronym);
-
-    return result;
-}
-
-// 分级查询组合生成
-// 输出: {完整原术语, 2-3 核心词组合, 单核心词} × 结巴变体
-// =============================================================
-// 编辑距离容错 (Levenshtein, 纯 ASCII)
-// 阈值自适应: len<5 不容忍, 5-8 允许 1, >8 允许 2
-// 只对全 ASCII 串, 中文靠 Jieba 就够了
-// =============================================================
-static int levenshteinDistance(const std::string& a, const std::string& b) {
-    if (a == b) return 0;
-    if (a.empty()) return (int)b.size();
-    if (b.empty()) return (int)a.size();
-
-    // 只支持 len(a) < len(b)
-    if (a.size() > b.size()) return levenshteinDistance(b, a);
-
-    std::vector<int> prev((int)b.size() + 1);
-    std::vector<int> curr((int)b.size() + 1);
-    for (int j = 0; j <= (int)b.size(); ++j) prev[j] = j;
-
-    for (int i = 1; i <= (int)a.size(); ++i) {
-        curr[0] = i;
-        for (int j = 1; j <= (int)b.size(); ++j) {
-            int cost = (a[i-1] == b[j-1]) ? 0 : 1;
-            curr[j] = std::min({prev[j] + 1, curr[j-1] + 1, prev[j-1] + cost});
-        }
-        prev.swap(curr);
-    }
-    return prev[(int)b.size()];
-}
-
-static bool isPureAscii(const std::string& s) {
-    for (char c : s) {
-        if (static_cast<unsigned char>(c) >= 0x80) return false;
-        if (!isalnum(static_cast<unsigned char>(c)) && c != ' ' && c != '-' && c != '_') return false;
-    }
-    return !s.empty();
-}
-
-static int maxEditDistance(const std::string& term) {
-    int len = (int)term.size();
-    if (len < 5) return 0;
-    if (len <= 8) return 1;
-    return 2;
-}
-
-// 单字符 substitution 候选: 对每个位置尝试 a-z (小写) + 大小写翻转
-static std::vector<std::string> generate1Substitution(const std::string& term) {
-    std::vector<std::string> out;
-    out.reserve(term.size() * 27);
-    std::string lower = to_lower(term);
-
-    for (size_t i = 0; i < lower.size(); ++i) {
-        if (!isalpha(static_cast<unsigned char>(lower[i]))) continue;
-        for (char c = 'a'; c <= 'z'; ++c) {
-            if (c == lower[i]) continue;
-            std::string variant = lower;
-            variant[i] = c;
-            out.push_back(variant);
-        }
-    }
-    return out;
-}
-
-// 高频技术同义词表 (4 核心域, 硬编码 + 可扩展)
-// key 小写 → value 候选串 (小写后生成 jieba_normalize 形态)
-static std::vector<std::string> lookupSynonyms(const std::string& term) {
-    static const std::vector<std::pair<std::string, std::vector<std::string>>> kSyn = {
-        {"kernel",        {"core", "os kernel", "os core", "monolithic", "microkernel"}},
-        {"kernel space",  {"kernelmode", "ring 0", "supervisor mode"}},
-        {"ring 0",        {"ring0", "kernel mode", "supervisor"}},
-        {"system call",   {"syscall", "sys call", "trap"}},
-        {"trap",          {"exception", "interrupt", "syscall"}},
-        {"interrupt",     {"irq", "exception", "trap"}},
-        {"context switch",{"context switching", "task switch", "thread switch"}},
-        {"virtual memory",{"vm", "virtual storage", "address translation"}},
-        {"vm",            {"virtual memory", "vm system"}},
-        {"page table",    {"translation table", "tlb table"}},
-        {"tlb",           {"translation lookaside buffer"}},
-        {"malloc",        {"memory allocator", "heap alloc", "allocation"}},
-        {"heap",          {"dynamic memory", "heap memory"}},
-        {"stack",         {"stack memory", "call stack"}},
-        {"mmu",           {"memory management unit", "address translation"}},
-        {"memory leak",   {"leak", "resource leak"}},
-        {"socket",        {"network socket", "berkeley socket"}},
-        {"tcp",           {"transmission control protocol"}},
-        {"udp",           {"user datagram protocol"}},
-        {"ip",            {"internet protocol"}},
-        {"load balancing",{"load balancer", "lb", "traffic distribution"}},
-        {"compiler",      {"transpiler", "code generator"}},
-        {"llvm",          {"low level vm", "bytecode", "ir"}},
-        {"hash",          {"hashing", "digest", "checksum"}},
-        {"encryption",    {"crypto", "cipher", "cryptography"}},
-        {"public key",    {"asymmetric", "pubkey", "rsa", "ecdsa"}},
-        {"mutex",         {"mutual exclusion", "lock", "spinlock"}},
-        {"race condition",{"data race", "thread race"}},
-        {"deadlock",      {"lock inversion", "circular wait"}},
-    };
-    std::vector<std::string> out;
-    std::string lower = to_lower(term);
-    for (auto& entry : kSyn) {
-        if (lower.find(entry.first) != std::string::npos) {
-            for (auto& v : entry.second) out.push_back(v);
-        }
-    }
-    return out;
-}
-
-
-static std::vector<std::string> buildQueryQueue(const std::string& raw_query,
-                                                 const std::string& context_focus) {
-    std::vector<std::string> queue;
-    auto add = [&](const std::string& s) {
-        if (s.empty()) return;
-        for (auto& e : queue) if (e == s) return;
-        queue.push_back(s);
-    };
-
-    // 0. 上下文 focus 关键词注入 (如果有)
-    std::vector<std::string> focus_tokens;
-    if (!context_focus.empty()) {
-        focus_tokens = rule_tokenize(context_focus);
-    }
-
-    // 1. 完整原术语 (先加)
-    for (auto& v : jieba_normalize(raw_query)) add(v);
-
-    // 2. 分词: 优先 cppjieba 真结巴, 失败回退规则分词
-    std::vector<std::string> tokens;
-#if RESEARCH_MCP_HAS_CPPJIEBA
-    auto jieba_tokens = tryJiebaSegment(raw_query);
-    // Jieba 结果 ≥ 规则分词结果更细 → 用 Jieba
-    if (!jieba_tokens.empty() && jieba_tokens.size() >= 2) {
-        tokens = jieba_tokens;
-    } else {
-        tokens = rule_tokenize(raw_query);
-    }
-#else
-    tokens = rule_tokenize(raw_query);
-#endif
-    std::vector<std::string> core_tokens;
-    for (auto& t : tokens) {
-        auto stripped = stripSuffix(t);
-        if (stripped.size() >= 2) core_tokens.push_back(stripped);
-    }
-    // 去重
-    {
-        std::set<std::string> seen;
-        std::vector<std::string> dedup;
-        for (auto& t : core_tokens) {
-            if (seen.insert(to_lower(t)).second) dedup.push_back(t);
-        }
-        core_tokens = dedup;
-    }
-
-    // 3. 2-3 核心词组合
-    if (core_tokens.size() >= 2 && core_tokens.size() <= 4) {
-        // 两两组合
-        for (size_t i = 0; i < core_tokens.size(); ++i) {
-            for (size_t j = i + 1; j < core_tokens.size(); ++j) {
-                std::string combo = core_tokens[i] + " " + core_tokens[j];
-                for (auto& v : jieba_normalize(combo)) add(v);
-            }
-        }
-    }
-    // focus + 核心词组合
-    for (auto& ft : focus_tokens) {
-        for (auto& ct : core_tokens) {
-            std::string combo = ft + " " + ct;
-            for (auto& v : jieba_normalize(combo)) add(v);
-        }
-    }
-
-    // 4. 单个核心词 (最后, 最宽泛)
-    for (auto& t : core_tokens) {
-        for (auto& v : jieba_normalize(t)) add(v);
-    }
-
-    // 5. 编辑距离容错 + 同义词变体 (宁准勿滥, 追加到末尾最低优先级)
-    std::set<std::string> queue_set(queue.begin(), queue.end());
-    for (auto& q : queue) {
-        // 5a. Levenshtein 1-substitution 候选 (纯 ASCII, len>=5)
-        if (isPureAscii(q) && maxEditDistance(q) >= 1) {
-            auto fuzzy = generate1Substitution(q);
-            for (auto& f : fuzzy) {
-                if (f.size() == q.size() && queue_set.insert(f).second) {
-                    queue.push_back(f);
-                }
-            }
-        }
-        // 5b. 同义词变体 (高频技术词硬编码表命中才加)
-        auto syns = lookupSynonyms(q);
-        for (auto& s : syns) {
-            if (queue_set.insert(s).second) queue.push_back(s);
-        }
-        // 5c. 同义词再走一次 jieba_normalize (大小写/符号归一)
-        for (auto& s : syns) {
-            for (auto& v : jieba_normalize(s)) {
-                if (queue_set.insert(v).second) queue.push_back(v);
-            }
-        }
-    }
-
-    return queue;
-}
-
-} // namespace query_preprocessor
+// query_preprocessor namespace MOVED to src/query_preprocessor.cpp (common layer)
 
 // =============================================================
 // WikiMiningPipeline 实现
@@ -375,15 +41,21 @@ json WikiMiningPipeline::mine(const std::string& query,
         return result;
     }
 
-    // —— 入口预处理: Jieba 分词 + 结巴容错 + 编辑距离 + 同义词变体 ——
-    auto query_queue = query_preprocessor::buildQueryQueue(query, context_focus);
-    for (auto& q : query_queue) result["query_queue"].push_back(q);
+    // —— 入口预处理: 公共 query_preprocessor ——
+    auto query_queue = buildQueryQueue(query, context_focus);
+    for (const auto& qs : query_queue) {
+        json entry = json::object();
+        entry["variant"] = qs.variant;
+        entry["source_tag"] = qs.source_tag;
+        result["query_queue"].push_back(entry);
+    }
 
     std::vector<MinedEntity> all_entities;
     bool high_conf_hit = false;
 
     // 对队列中每个查询依次尝试挖掘路径 (高优先级先试)
-    for (auto& q : query_queue) {
+    for (const auto& qs : query_queue) {
+        const auto& q = qs.variant;  // 用原 variant string 保持零行为变化
         if (high_conf_hit) break;
 
         // 路径 1: 分类树向下遍历

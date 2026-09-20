@@ -83,7 +83,10 @@ else()
     if(NOT TARGET cppjieba::cppjieba AND TARGET cppjieba)
         add_library(cppjieba::cppjieba ALIAS cppjieba)
     endif()
-    set_source_files_properties(src/wiki_mining.cpp PROPERTIES
+    set_source_files_properties(
+        src/wiki_mining.cpp
+        src/query_preprocessor.cpp
+        PROPERTIES
         COMPILE_DEFINITIONS CPPJIEBA_DICT_PATH="${cppjieba_SOURCE_DIR}/dict")
 endif()
 # 基础构建选项
@@ -168,6 +171,7 @@ add_executable(research-mcp
     src/huggingface_tools.cpp
     src/semanticscholar_tools.cpp
     src/academic_resolver.cpp
+     src/query_preprocessor.cpp
     src/stackoverflow_tools.cpp
     src/formatters.cpp
     src/string_utils.cpp

@@ -2,6 +2,7 @@
 #include "github_research/webview_helpers.hpp"
 #include "github_research/cache_manager.hpp"
 #include "github_research/academic_resolver.hpp"
+#include "github_research/query_preprocessor.hpp"
 #include "github_research/curl_http_client.hpp"
 #include <iostream>
 #include <sstream>
@@ -251,33 +252,37 @@ json ToolArxivSearchPapers(const json& args) {
 
     json entries = fetch_arxiv_api(url);
 
-    // ── 宽松 fallback ──
-    // 现象:罕见技术术语直接搜可能返回 0(arxiv API 无模糊匹配)
-    // 策略:第一次空 → 拆词做 OR 组合再试一次
+    // ── 公共 query_preprocessor 模糊降级链 ──
+    // 替换原简陋 OR fallback (拆词做 OR 组合)
+    // 策略: 原始 query 零命中 → 用 buildQueryQueue 生成变体 → 依次尝试
+    //   - 跳过第一个变体 (通常是原始 query 的归一化形态, 已试过)
+    //   - 总开销预算: 额外查询 ≤ 3 次 (arxiv 远程 API)
+    //   - 模糊来源 (fuzzy_lev1 / synonym) → match_type=fuzzy + confidence 标记
+    bool fuzzy_hit = false;
+    std::string fuzzy_variant_used;
+    std::string fuzzy_source_tag;
     if (entries.empty()) {
-        std::cerr << "[arxiv] primary query returned empty, trying OR fallback" << std::endl;
-        std::string fallback_query;
-        std::string word;
-        for (char c : query) {
-            if (c == ' ') {
-                if (!word.empty()) {
-                    if (!fallback_query.empty()) fallback_query += " OR ";
-                    fallback_query += "ti:" + word;
-                    word.clear();
-                }
-            } else word += c;
-        }
-        if (!word.empty()) {
-            if (!fallback_query.empty()) fallback_query += " OR ";
-            fallback_query += "ti:" + word;
-        }
-        if (!fallback_query.empty() && fallback_query != query) {
-            std::string fallback_url = std::string("http://export.arxiv.org/api/query?search_query=")
-                + UrlEncodeComponent(fallback_query)
+        auto queue = buildQueryQueue(query, "");
+        constexpr int kMaxExtraQueries = 3;
+        int extra = 0;
+        for (size_t i = 1; i < queue.size() && extra < kMaxExtraQueries; ++i) {
+            const auto& qs = queue[i];
+            if (qs.variant == query) continue;  // 跳过重复
+            std::cerr << "[arxiv] trying variant [" << qs.source_tag << "]: " << qs.variant << std::endl;
+            std::string v_url = std::string("http://export.arxiv.org/api/query?search_query=all:")
+                + UrlEncodeComponent(qs.variant)
                 + "&start=0&max_results=" + std::to_string(maxResults)
                 + "&sortBy=relevance&sortOrder=descending";
-            entries = fetch_arxiv_api(fallback_url);
-            std::cerr << "[arxiv] OR fallback returned " << entries.size() << " entries" << std::endl;
+            json v_entries = fetch_arxiv_api(v_url);
+            extra++;
+            if (!v_entries.empty()) {
+                entries = v_entries;
+                fuzzy_hit = true;
+                fuzzy_variant_used = qs.variant;
+                fuzzy_source_tag = qs.source_tag;
+                std::cerr << "[arxiv] variant hit (" << qs.source_tag << ") → " << entries.size() << " entries" << std::endl;
+                break;
+            }
         }
     }
 
@@ -303,6 +308,23 @@ json ToolArxivSearchPapers(const json& args) {
         {"total_returned", results.size()},
         {"items", results}
     };
+
+    // ── 风险控制: 模糊命中 → 降置信度 + 溯源标记 ──
+    // isFuzzySource() = true 时 confidence 从 0.9 → 0.8, 非模糊命中保持 0.9
+    if (fuzzy_hit) {
+        bool is_fuzzy = isFuzzySource(fuzzy_source_tag);
+        payload["confidence"] = is_fuzzy ? 0.8 : 0.9;
+        payload["_source"] = json::object();
+        payload["_source"]["match_type"] = fuzzy_source_tag;
+        payload["_source"]["fuzzy_variant"] = fuzzy_variant_used;
+        payload["_source"]["fuzzy_source_tag"] = fuzzy_source_tag;
+        payload["_source"]["original_query"] = query;
+    } else {
+        payload["confidence"] = 0.9;
+        payload["_source"] = json::object();
+        payload["_source"]["match_type"] = "exact";
+        payload["_source"]["original_query"] = query;
+    }
     return WrapMcpResult(payload);
 }
 
