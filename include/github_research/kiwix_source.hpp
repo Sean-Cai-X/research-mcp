@@ -24,10 +24,14 @@ public:
 
     bool healthCheck() override;
     std::vector<SearchResult> search(const SearchQuery& query) override;
-    std::optional<FetchResult> fetch(const std::string& canonical_uri) override;
+    std::optional<FetchResult> fetch(const std::string& canonical_uri)
+override;
     std::vector<std::string> expand(const std::string& root_uri,
                                      const std::string& sub_path,
                                      int max_depth) override;
+
+    // Raw HTML fetch — for structure mining (category tree, link graph, redirect)
+    std::optional<std::string> fetchRawHtml(const std::string& canonical_uri);
 
 private:
     std::string base_url_;

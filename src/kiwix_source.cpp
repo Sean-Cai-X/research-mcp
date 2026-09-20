@@ -189,6 +189,25 @@ std::optional<FetchResult> KiwixSource::fetch(const std::string& canonical_uri) 
     return fr;
 }
 
+std::optional<std::string> KiwixSource::fetchRawHtml(const std::string& canonical_uri) {
+    if (!http_client_ || !http_client_->is_ready()) return std::nullopt;
+
+    static const std::string scheme = "kiwix://";
+    if (canonical_uri.compare(0, scheme.size(), scheme) != 0) return std::nullopt;
+    std::string uri_path = canonical_uri.substr(scheme.size());
+
+    size_t slash = uri_path.find('/');
+    if (slash == std::string::npos) return std::nullopt;
+    std::string zim_id = uri_path.substr(0, slash);
+    std::string article_path = uri_path.substr(slash + 1);
+    if (zim_id.empty() || article_path.empty()) return std::nullopt;
+
+    std::string url = base_url_ + "/content/" + zim_id + "/" + article_path;
+    HttpResponse resp = http_client_->get(url);
+    if (resp.status_code != 200 || resp.body.empty()) return std::nullopt;
+    return resp.body;
+}
+
 std::vector<std::string> KiwixSource::expand(const std::string& root_uri,
                                              const std::string& sub_path,
                                              int max_depth) {

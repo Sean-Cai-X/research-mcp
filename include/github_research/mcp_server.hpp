@@ -11,6 +11,7 @@
 #include "github_research/browser_session.hpp"
 #include "datasource_registry.hpp"
 #include "wiki_explorer.hpp"
+#include "wiki_structure.hpp"
 #include "kiwix_source.hpp"
 #include "git_raw_source.hpp"
 #include "github_wiki_source.hpp"
@@ -175,6 +176,7 @@ private:
     std::unique_ptr<IHttpClient> shared_http_client_;
     std::unique_ptr<DataSourceRegistry> datasource_registry_;
     std::unique_ptr<WikiExplorer> wiki_explorer_;
+    std::unique_ptr<WikiStructure> wiki_structure_;
     bool datasource_initialized_ = false;
 
     // ---------- 自动蔓延后台线程 ----------

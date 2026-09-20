@@ -184,6 +184,7 @@ add_executable(research-mcp
     src/git_clone_source.cpp
     src/wiki_explorer.cpp
     src/wiki_mining.cpp
+    src/wiki_structure.cpp
     src/focus_tools.cpp
     src/focus_engine.cpp
     src/focus_attr_engine.cpp

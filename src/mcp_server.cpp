@@ -1,4 +1,4 @@
-﻿#include "github_research/mcp_server.hpp"
+#include "github_research/mcp_server.hpp"
 #include "github_research/string_utils.hpp"
 #include "github_research/errors.hpp"
 #include "github_research/http_server.hpp"
@@ -682,6 +682,9 @@ void McpServer::init_datasource_registry() {
     wiki_explorer_ = std::make_unique<WikiExplorer>(*datasource_registry_,
                                                        CacheManager::instance());
 
+    // Create WikiStructure (phase 3: structure signal mining)
+    wiki_structure_ = std::make_unique<WikiStructure>(*datasource_registry_);
+
     DBG_LOG("wiki") << "datasource registry ready: " << datasource_registry_->size() << " sources";
 }
 
@@ -740,6 +743,28 @@ json McpServer::dispatch_wiki_tool(const std::string& tool_name, const json& arg
         if (tool_name == "wiki_scan") {
             auto res = wiki_explorer_->scan(args);
             return McpSuccess(res);
+        }
+        if (tool_name == "wiki_category_graph") {
+            if (!wiki_structure_) return McpError("ERROR: WikiStructure not initialized.");
+            std::string root_cat = args.value("root_category", "");
+            std::string zim_id   = args.value("zim_id", "wikipedia/en");
+            int max_depth        = args.value("max_depth", 2);
+            auto graph = wiki_structure_->categoryGraph(root_cat, zim_id, max_depth);
+            return McpSuccess(wiki_structure_->toJson(graph));
+        }
+        if (tool_name == "wiki_link_graph") {
+            if (!wiki_structure_) return McpError("ERROR: WikiStructure not initialized.");
+            std::string uri = args.value("canonical_uri", "");
+            int depth       = args.value("depth", 1);
+            int max_nodes   = args.value("max_nodes", 100);
+            auto graph = wiki_structure_->linkGraph(uri, depth, max_nodes);
+            return McpSuccess(wiki_structure_->toJson(graph));
+        }
+        if (tool_name == "wiki_redirect_info") {
+            if (!wiki_structure_) return McpError("ERROR: WikiStructure not initialized.");
+            std::string uri = args.value("canonical_uri", "");
+            auto info = wiki_structure_->redirectInfo(uri);
+            return McpSuccess(wiki_structure_->toJson(info));
         }
     } catch (const std::exception& e) {
         return McpError(std::string("ERROR: wiki tool exception: ") + e.what());
@@ -2015,6 +2040,46 @@ json McpServer::handle_tools_list() {
                         {"force_refresh", json::object({{"type","boolean"},{"default",false}})}
                     })},
                     {"required", json::array({"root_canonical_uri","sub_path"})}
+                })}
+            },
+            // ═══════════════════════════════════════════════════════════
+            //  Wiki Structure Mining — Phase 3 内源结构信号
+            // ═══════════════════════════════════════════════════════════
+            {
+                {"name", "wiki_category_graph"},
+                {"description", "Recursively crawl a Wikipedia category tree, producing is_a hierarchy edges + article leaves. Use for concept taxonomy mapping from a root category."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"root_category", json::object({{"type","string"},{"description","Root category name, e.g. 'Machine_learning' or 'Category:Machine_learning'"}})},
+                        {"zim_id", json::object({{"type","string"},{"description","ZIM file identifier, e.g. 'wikipedia/en'"},{"default","wikipedia/en"}})},
+                        {"max_depth", json::object({{"type","integer"},{"minimum",1},{"maximum",5},{"default",2}})}
+                    })},
+                    {"required", json::array({"root_category"})}
+                })}
+            },
+            {
+                {"name", "wiki_link_graph"},
+                {"description", "BFS-expand internal wiki links from a center page, build directed graph, and rank nodes by core_score (PageRank-lite + in-degree). Use for discovering influential/hub pages within a topic cluster."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"canonical_uri", json::object({{"type","string"},{"description","Center page canonical_uri, e.g. 'kiwix://wikipedia/en/Transformer_(machine_learning_model)'"}})},
+                        {"depth", json::object({{"type","integer"},{"minimum",1},{"maximum",3},{"default",1},{"description","BFS depth: 1 = direct links only, 2 = links of links"}})},
+                        {"max_nodes", json::object({{"type","integer"},{"minimum",10},{"maximum",300},{"default",100}})}
+                    })},
+                    {"required", json::array({"canonical_uri"})}
+                })}
+            },
+            {
+                {"name", "wiki_redirect_info"},
+                {"description", "Check whether a wiki page is a soft redirect (#REDIRECT / mw-redirect class) or a disambiguation page. Returns redirect target or disambiguation candidates."},
+                {"inputSchema", json::object({
+                    {"type", "object"},
+                    {"properties", json::object({
+                        {"canonical_uri", json::object({{"type","string"},{"description","Page canonical_uri to inspect"}})}
+                    })},
+                    {"required", json::array({"canonical_uri"})}
                 })}
             },
             // ═══════════════════════════════════════════════════════════
