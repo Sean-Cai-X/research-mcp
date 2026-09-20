@@ -6,12 +6,38 @@
 
 ## 特性
 
-### 核心检索(60+ 工具)
+### 核心检索(65+ 工具)
 - **9 源统一**:Kiwix Local / GitHub / arXiv / Hacker News / npm+PyPI / Papers with Code / Hugging Face / Semantic Scholar / Stack Overflow
 - **全链路纯 HTTP REST**:所有核心工具通过 libcurl + 官方 API 实现,**零浏览器依赖,启动即用**
 - **CDP 固定浏览器后端**:原生 Winsock2/POSIX socket 手写 WebSocket 帧,Chrome `--remote-debugging-port` headless,自动处理分片帧/ping/pong/代理隔离/ws 断线自动重连
 - **代理统一传递**:`--proxy` 命令行参数自动写入进程环境变量,所有 curl 实例(含浏览器 CDP Chrome)统一继承
 - **引用溯源**:每个工具返回自动注入 `_source` 元数据,含 `tool / source_id / fetched_at / source_url / cache_hit`
+
+### 学术源五级降级 (academic_resolver) 📚
+统一调度器 `academic_resolver.hpp` 把 S2 / arXiv 的详情获取从「一条请求 → 一个结果」升级为 **自动降级链 + 置信度分级落库**:
+
+| 层级 | 触发条件 | 动作 | confidence | 落库等级 |
+|---|---|---|---|---|
+| **L1_ORIGINAL_ID** | 默认入口 | 原 ID 直接调用 | 1.0 | 正式实体 |
+| **L2_EXACT_TITLE** | ID 失效/404 | 完整标题同源精确匹配,取 Top1 | 0.9 | 正式实体 |
+| **L3_CORE_TERMS** | 精确标题零命中 | 3-5 核心术语 + 领域限定窄搜 | 0.8 | 正式实体 |
+| **L4_CROSS_SOURCE** | 同源所有方式失败 | 切换另一学术源检索 | 0.7 | 候选实体 |
+| **L5_CLUE_ONLY** | 全部失败 | 仅存查询意图,不实体化 | <0.6 | 线索 |
+
+- **S2 限流治理**:429 自动 1s/2s/4s 指数退避,最多 3 次
+- **锚点硬化**:实体入库必须 `title + authors + year` 三个硬锚点齐全,否则自动降级
+- **分级落库**:confidence ≥0.8 → `entities` 主表,0.6~0.8 → `cache_entries` 候选,<0.6 → 仅日志
+
+### Wiki 内源结构信号 (wiki_structure) 📖
+在 Kiwix 本地 ZIM 快照上,从纯阅读扩展到**结构化挖掘**,新增 3 个 `wiki_*` 工具:
+
+| 工具 | 能力 | 产出 |
+|---|---|---|
+| `wiki_category_graph` | 从根分类递归 DFS,自动过滤 `File:`/`Template:`/`Help:` 等特殊页 | 分类节点 + 条目叶子 + `is_a` 层级边 |
+| `wiki_link_graph` | BFS 展开内部链接,构建有向图 | 节点按 `core_score` 排序(70% PageRank-lite + 30% in-degree) |
+| `wiki_redirect_info` | 检测 `#REDIRECT` / `mw-redirect` class / `disambiguation` 模板 | 重定向目标 + 消歧义候选列表 |
+
+> **明确放弃**:编辑活跃度监控 — Kiwix ZIM 是静态快照,无历史版本,需要 MediaWiki API,违背 local-first 架构。
 
 ### 四层态势感知 (Situation Engine) 🧭
 完整嵌入 `focus_sprawl_tick` 每轮执行周期,形成**「基准快照 → 蔓延执行 → 差分计算 → 态势解析 → 事件研判 → 分级通知输出」**闭环:
@@ -154,7 +180,7 @@ From Serial → Parallel Inference
 │  github_* (20) / arxiv_* (6) / hn_* (7) / pkg_* (5) /          │
 │  pwc_*   (6) / hf_*   (9) / s2_*    (7) / so_*    (6)          │
 │  + github_module_timeline_analysis (L2/L3)                      │
-│  + focus_* (10) / entity_* (1) / wiki_* (3) / web_search      │
+│  + focus_* (10) / entity_* (1) / wiki_* (6) / web_search      │
 │  + situation_* (2): focus_snapshot / focus_situation_report    │
 └────────────────┬───────────────────────────────────────────────┘
                  │
